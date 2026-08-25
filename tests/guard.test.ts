@@ -103,4 +103,17 @@ describe('guard handler via createGuardHandler', () => {
     expect(JSON.stringify(payload.args)).toContain('[REDACTED]')
     expect(JSON.stringify(payload.args)).not.toContain('sk-12345678901234567890')
   })
+  it('ghp_ token redacted via containsSecret gate (all families)', async () => {
+    const { createGuardHandler } = await import('../src/index.js')
+    const dir = await mkdtemp(join(tmpdir(), 'g-'))
+    const store = new ApprovalStore(dir)
+    const policy = new PermissionPolicy({})
+    const handler = createGuardHandler(store, policy)
+    const raw = 'ghp_123456789012345678901234567890123456'
+    const payload: any = { name: 'safe-tool', arguments: { token: raw } }
+    const result = await handler(payload, async () => ({ kind: 'allow' as const }))
+    expect(result).toEqual({ kind: 'allow' })
+    expect(JSON.stringify(payload.arguments)).toContain('[REDACTED]')
+    expect(JSON.stringify(payload.arguments)).not.toContain(raw)
+  })
 });

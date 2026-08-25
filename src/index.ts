@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { ApprovalStore } from './approval-store.js'
 import { PermissionPolicy } from './permission-policy.js'
-import { redact } from './secret-redactor.js'
+import { containsSecret, redact } from './secret-redactor.js'
 import type { GuardToolExecution, GuardPreToolDecision } from './augment.js'
 
 export function createGuardHandler(store: ApprovalStore, policy: PermissionPolicy) {
@@ -17,7 +17,7 @@ export function createGuardHandler(store: ApprovalStore, policy: PermissionPolic
     }
     if (rawArgs != null) {
       const asText = JSON.stringify(rawArgs)
-      if (asText.includes('glpat-') || asText.includes('sk-')) {
+      if (containsSecret(asText)) {
         const redacted = JSON.parse(redact(asText))
         if ('args' in exec) (exec as any).args = redacted
         if ('arguments' in exec) (exec as any).arguments = redacted
