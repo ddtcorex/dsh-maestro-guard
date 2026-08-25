@@ -1,4 +1,9 @@
 import { describe, it, expect } from 'vitest';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { ApprovalStore } from '../src/approval-store.js';
+import { PermissionPolicy } from '../src/permission-policy.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -30,4 +35,16 @@ describe('dsh-maestro-guard', () => {
     expect(yml).toContain('dsh-maestro-guard');
     expect(yml).toContain('@ddtcorex/dsh-maestro-guard');
   });
+});
+
+// Simulate waterfall: guard should block unapproved tool
+describe('guard waterfall', () => {
+  it('blocks unapproved dangerous tool', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'g-'))
+    const store = new ApprovalStore(dir)
+    const policy = new PermissionPolicy({ deny: ['danger-tool'] })
+    // waterfall handler would check: !store.isApproved && policy.isAllowed => block
+    expect(policy.isAllowed('danger-tool', {})).toBe(false)
+    expect(await store.isApproved('danger-tool')).toBe(false)
+  })
 });

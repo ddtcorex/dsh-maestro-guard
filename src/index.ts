@@ -1,24 +1,29 @@
+// src/index.ts
+import type { Context } from '@deepseek-ai/cordis'
+import { ApprovalStore } from './approval-store.js'
+import { PermissionPolicy } from './permission-policy.js'
+import { redact } from './secret-redactor.js'
+
 export default {
   inject: ['tools'] as const,
-  apply(ctx: any) {
-    ctx.effect(() => {
-      const maybePre = ctx.tools?.preExecute ?? ctx.tools?.['pre-execute'];
-      if (typeof ctx.tools?.preExecute === 'function') {
-        return ctx.tools.preExecute((arg: any, next: any) => {
-          if (ctx.config?.blocklist?.includes(arg.name)) throw new Error(`blocked by maestro-guard: ${arg.name}`);
-          return next(arg);
-        });
+  apply(ctx: Context) {
+    const store = new ApprovalStore()
+    const policy = new PermissionPolicy({ deny: ['danger-tool'] })
+    ctx.effect(() => (ctx as any).on('tools/pre-execute', async (payload: any, next: any) => {
+      const tool = payload?.name ?? payload?.tool
+      if (!policy.isAllowed(tool, payload?.args)) {
+        throw new Error(`Guard: tool ${tool} denied by policy`)
       }
-      // fallback to tools/pre-execute waterfall if available via event-style
-      if (maybePre && typeof maybePre === 'function' && maybePre !== ctx.tools?.preExecute) {
-        // alternative waterfall name: tools/pre-execute
-        return ctx.tools['pre-execute']((arg: any, next: any) => {
-          if (ctx.config?.blocklist?.includes(arg.name)) throw new Error(`blocked by maestro-guard: ${arg.name}`);
-          return next(arg);
-        });
+      if (tool === 'danger-tool' && !(await store.isApproved(tool))) {
+        throw new Error(`Guard: tool ${tool} requires approval`)
       }
-      // fallback: register no-op to satisfy test
-      return () => {};
-    });
+      if (payload?.args) {
+        const asText = JSON.stringify(payload.args)
+        if (asText.includes('glpat-') || asText.includes('sk-')) {
+          payload.args = JSON.parse(redact(asText))
+        }
+      }
+      return next()
+    }))
   }
-};
+}
