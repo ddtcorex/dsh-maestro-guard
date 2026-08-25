@@ -1,0 +1,37 @@
+{
+  "name": "@ddtcorex/dsh-maestro-guard",
+  "version": "0.1.0",
+  "description": "Maestro Guard — waterfall tools/pre-execute approval + blocklist stub (Phase A scaffold)",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "src",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "verify": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "typescript": "^5.8.0",
+    "vitest": "^2.0.0",
+    "@types/node": "^22.0.0"
+  }
+}

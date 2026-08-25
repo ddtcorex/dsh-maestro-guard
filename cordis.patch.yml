@@ -1,0 +1,4 @@
+# dsh-maestro-guard bundle patch — single row for the guard stub (Phase A).
+- insert:
+    - id: dsh-maestro-guard
+      name: '@ddtcorex/dsh-maestro-guard'
