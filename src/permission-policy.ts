@@ -8,7 +8,8 @@ export class PermissionPolicy {
   }
   check(tool: string): 'allow'|'deny'|'ask' {
     if (this.policy.deny?.includes(tool)) return 'deny'
-    if (this.policy.allow && !this.policy.allow.includes(tool)) return 'ask'
+    const hasAllow = Array.isArray(this.policy.allow) && this.policy.allow.length > 0
+    if (hasAllow && !this.policy.allow!.includes(tool)) return 'ask'
     return 'allow'
   }
 }
