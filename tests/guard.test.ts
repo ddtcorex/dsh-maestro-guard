@@ -48,3 +48,59 @@ describe('guard waterfall', () => {
     expect(await store.isApproved('danger-tool')).toBe(false)
   })
 });
+
+describe('guard handler via createGuardHandler', () => {
+  it('deny-path throws for denied tool', async () => {
+    const { createGuardHandler } = await import('../src/index.js')
+    const dir = await mkdtemp(join(tmpdir(), 'g-'))
+    const store = new ApprovalStore(dir)
+    const policy = new PermissionPolicy({ deny: ['danger-tool'] })
+    const handler = createGuardHandler(store, policy)
+    const payload: any = { name: 'danger-tool', arguments: { token: 'glpat-abc123DEF4567890extra' } }
+    await expect(handler(payload, async () => ({ kind: 'allow' as const }))).rejects.toThrow(/denied by policy/)
+  })
+  it('unapproved danger-tool throws requires approval', async () => {
+    const { createGuardHandler } = await import('../src/index.js')
+    const dir = await mkdtemp(join(tmpdir(), 'g-'))
+    const store = new ApprovalStore(dir)
+    const policy = new PermissionPolicy({}) // allow all, so deny check passes but approval fails
+    const handler = createGuardHandler(store, policy)
+    const payload: any = { name: 'danger-tool', arguments: { note: 'hello' } }
+    await expect(handler(payload, async () => ({ kind: 'allow' as const }))).rejects.toThrow(/requires approval/)
+  })
+  it('approved tool with secret in arguments → next receives redacted payload', async () => {
+    const { createGuardHandler } = await import('../src/index.js')
+    const dir = await mkdtemp(join(tmpdir(), 'g-'))
+    const store = new ApprovalStore(dir)
+    await store.approve('danger-tool')
+    const policy = new PermissionPolicy({}) // allow all
+    const handler = createGuardHandler(store, policy)
+    const payload: any = { name: 'danger-tool', arguments: { token: 'glpat-abc123DEF4567890extra' } }
+    let nextCalled = false
+    let nextPayload: any = null
+    const next = async () => {
+      nextCalled = true
+      nextPayload = payload // handler mutates payload in place before calling next
+      return { kind: 'allow' as const }
+    }
+    const result = await handler(payload, next)
+    expect(nextCalled).toBe(true)
+    expect(result).toEqual({ kind: 'allow' })
+    const asText = JSON.stringify(payload.arguments)
+    expect(asText).toContain('[REDACTED]')
+    expect(asText).not.toContain('glpat-abc123DEF4567890extra')
+    // also ensure next saw redacted (if next captured after mutation, same object)
+    expect(JSON.stringify(nextPayload.arguments)).toContain('[REDACTED]')
+  })
+  it('args shape also redacted (backward compat)', async () => {
+    const { createGuardHandler } = await import('../src/index.js')
+    const dir = await mkdtemp(join(tmpdir(), 'g-'))
+    const store = new ApprovalStore(dir)
+    const policy = new PermissionPolicy({})
+    const handler = createGuardHandler(store, policy)
+    const payload: any = { name: 'safe-tool', args: { secret: 'sk-12345678901234567890' } }
+    await handler(payload, async () => ({ kind: 'allow' as const }))
+    expect(JSON.stringify(payload.args)).toContain('[REDACTED]')
+    expect(JSON.stringify(payload.args)).not.toContain('sk-12345678901234567890')
+  })
+});
