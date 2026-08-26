@@ -5,7 +5,6 @@ import { dirname, join } from 'node:path'
 function resolveHome(dshHome?: string) { return dshHome ?? process.env.DSH_HOME ?? join(homedir(), '.dsh') }
 export function approvalsPath(dshHome?: string) { return join(resolveHome(dshHome), 'dsh-maestro-guard', 'approvals.json') }
 export const pathFor = approvalsPath
-function legacyPath(dshHome?: string) { return join(resolveHome(dshHome), 'dsh-maestro-harness', 'approvals.json') }
 
 let _queue: Promise<unknown> = Promise.resolve()
 function enqueue<T>(fn: () => Promise<T>): Promise<T> {
@@ -16,17 +15,7 @@ function enqueue<T>(fn: () => Promise<T>): Promise<T> {
 
 export class ApprovalStore {
   constructor(private dshHome?: string) {}
-  private async maybeMigrate() {
-    try { await readFile(approvalsPath(this.dshHome), 'utf-8'); return } catch {}
-    try {
-      const data = await readFile(legacyPath(this.dshHome), 'utf-8')
-      await mkdir(dirname(approvalsPath(this.dshHome)), { recursive: true, mode: 0o700 })
-      await writeFile(approvalsPath(this.dshHome), data, { encoding: 'utf-8', mode: 0o600 })
-      await chmod(approvalsPath(this.dshHome), 0o600)
-    } catch {}
-  }
   async load(): Promise<Record<string, boolean>> {
-    await this.maybeMigrate()
     try { return JSON.parse(await readFile(approvalsPath(this.dshHome), 'utf-8')) } catch { return {} }
   }
   async isApproved(tool: string): Promise<boolean> { const m = await this.load(); return !!m[tool] }
