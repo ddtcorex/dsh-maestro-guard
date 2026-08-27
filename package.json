@@ -1,6 +1,7 @@
 {
   "name": "@ddtcorex/dsh-maestro-guard",
   "version": "0.1.0",
+  "private": false,
   "description": "Maestro Guard — waterfall tools/pre-execute approval + blocklist stub (Phase A scaffold)",
   "type": "module",
   "main": "./lib/index.js",
