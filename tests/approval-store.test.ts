@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ApprovalStore } from '../src/approval-store.js'
+import { ApprovalStore } from '../src/host/approval-store.js'
 
 describe('ApprovalStore', () => {
   let dir: string
@@ -27,7 +27,7 @@ describe('ApprovalStore', () => {
   })
   it('corrupted JSON file -> load returns {} and isApproved false', async () => {
     const { mkdir, writeFile } = await import('node:fs/promises')
-    const { approvalsPath } = await import('../src/approval-store.js')
+    const { approvalsPath } = await import('../src/host/approval-store.js')
     const p = approvalsPath(dir)
     const { dirname } = await import('node:path')
     await mkdir(dirname(p), { recursive: true })

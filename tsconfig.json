@@ -5,7 +5,7 @@
     "moduleResolution": "NodeNext",
     "declaration": true,
     "outDir": "lib",
-    "rootDir": "src",
+    "rootDir": "src/host",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -18,6 +18,6 @@
     "rewriteRelativeImportExtensions": true,
     "verbatimModuleSyntax": false
   },
-  "include": ["src/**/*"],
-  "exclude": ["lib", "node_modules", "client", "tests"]
+  "include": ["src/host/**/*"],
+  "exclude": ["lib", "node_modules"]
 }
