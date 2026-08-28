@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { PermissionPolicy } from '../src/permission-policy.js'
+import { PermissionPolicy } from '../src/host/permission-policy.js'
 
 describe('PermissionPolicy', () => {
   it('deny list blocks', () => {

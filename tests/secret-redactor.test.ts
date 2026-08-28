@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { redact, containsSecret } from '../src/secret-redactor.js'
+import { redact, containsSecret } from '../src/host/secret-redactor.js'
 
 describe('secret-redactor', () => {
   it('redacts gitlab token', () => {

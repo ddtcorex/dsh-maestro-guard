@@ -8,10 +8,11 @@ Explain the problem this PR solves and why this approach was chosen.
 
 ## Changes
 
-- [ ] Code / skill content updated
-- [ ] Tests added or updated (if behavior changed)
-- [ ] Documentation updated (if needed)
-- [ ] Version bumped in `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.codex-plugin/plugin.json`, and `package.json` (if release-relevant)
+- [ ] Code updated (`src/host/` — approval-store / secret-redactor / permission-policy / Cordis row)
+- [ ] Tests added or updated (`tests/` — vitest, 27 tests)
+- [ ] Documentation updated (`README.md` / `CONTRIBUTING.md` / `CHANGELOG.md` if needed)
+- [ ] `lib/index.js` rebuilt and verified flat (`test -f lib/index.js`)
+- [ ] Version bumped in `package.json` and `CHANGELOG.md` (if release-relevant)
 
 ## Validation
 
@@ -21,13 +22,7 @@ Paste exact commands and outcomes (do not claim verified without evidence):
 pnpm verify
 pnpm test
 pnpm build
-```
-
-Additional checks (when relevant):
-
-```bash
-claude plugin validate . --strict
-bash -n install.sh
+test -f lib/index.js && echo "flat OK" || echo "FAIL"
 ```
 
 ## Linked Issues

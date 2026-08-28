@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ApprovalStore } from '../src/approval-store.js';
-import { PermissionPolicy } from '../src/permission-policy.js';
+import { ApprovalStore } from '../src/host/approval-store.js';
+import { PermissionPolicy } from '../src/host/permission-policy.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -17,8 +17,8 @@ function readFileCandidates(...candidates: string[]): string {
 }
 
 describe('dsh-maestro-guard', () => {
-  it('src/index.ts contains preExecute or waterfall', () => {
-    const src = readFileCandidates('packages/dsh-maestro-guard/src/index.ts', 'src/index.ts');
+  it('src/host/index.ts contains preExecute or waterfall', () => {
+    const src = readFileCandidates('packages/dsh-maestro-guard/src/host/index.ts', 'src/host/index.ts', 'packages/dsh-maestro-guard/src/index.ts', 'src/index.ts');
     const hasWaterfall = src.includes('preExecute') || src.includes('pre-execute') || src.includes('tools/pre-execute');
     expect(hasWaterfall).toBe(true);
   });
@@ -51,7 +51,7 @@ describe('guard waterfall', () => {
 
 describe('guard handler via createGuardHandler', () => {
   it('deny-path throws for denied tool', async () => {
-    const { createGuardHandler } = await import('../src/index.js')
+    const { createGuardHandler } = await import('../src/host/index.js')
     const dir = await mkdtemp(join(tmpdir(), 'g-'))
     const store = new ApprovalStore(dir)
     const policy = new PermissionPolicy({ deny: ['danger-tool'] })
@@ -60,7 +60,7 @@ describe('guard handler via createGuardHandler', () => {
     await expect(handler(payload, async () => ({ kind: 'allow' as const }))).rejects.toThrow(/denied by policy/)
   })
   it('unapproved danger-tool throws requires approval', async () => {
-    const { createGuardHandler } = await import('../src/index.js')
+    const { createGuardHandler } = await import('../src/host/index.js')
     const dir = await mkdtemp(join(tmpdir(), 'g-'))
     const store = new ApprovalStore(dir)
     const policy = new PermissionPolicy({}) // allow all, so deny check passes but approval fails
@@ -69,7 +69,7 @@ describe('guard handler via createGuardHandler', () => {
     await expect(handler(payload, async () => ({ kind: 'allow' as const }))).rejects.toThrow(/requires approval/)
   })
   it('approved tool with secret in arguments → next receives redacted payload', async () => {
-    const { createGuardHandler } = await import('../src/index.js')
+    const { createGuardHandler } = await import('../src/host/index.js')
     const dir = await mkdtemp(join(tmpdir(), 'g-'))
     const store = new ApprovalStore(dir)
     await store.approve('danger-tool')
@@ -93,7 +93,7 @@ describe('guard handler via createGuardHandler', () => {
     expect(JSON.stringify(nextPayload.arguments)).toContain('[REDACTED]')
   })
   it('args shape also redacted (backward compat)', async () => {
-    const { createGuardHandler } = await import('../src/index.js')
+    const { createGuardHandler } = await import('../src/host/index.js')
     const dir = await mkdtemp(join(tmpdir(), 'g-'))
     const store = new ApprovalStore(dir)
     const policy = new PermissionPolicy({})
@@ -104,7 +104,7 @@ describe('guard handler via createGuardHandler', () => {
     expect(JSON.stringify(payload.args)).not.toContain('sk-12345678901234567890')
   })
   it('ghp_ token redacted via containsSecret gate (all families)', async () => {
-    const { createGuardHandler } = await import('../src/index.js')
+    const { createGuardHandler } = await import('../src/host/index.js')
     const dir = await mkdtemp(join(tmpdir(), 'g-'))
     const store = new ApprovalStore(dir)
     const policy = new PermissionPolicy({})
