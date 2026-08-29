@@ -1,4 +1,6 @@
+packages:
+  - .
 allowBuilds:
   esbuild: true
-packages:
-  - '../dsh-maestro-config-lib'
+minimumReleaseAgeExclude:
+  - '@ddtcorex/dsh-maestro-config-lib@0.1.2'

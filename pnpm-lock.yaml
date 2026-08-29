@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@ddtcorex/dsh-maestro-config-lib':
-        specifier: workspace:^0.1.2
-        version: link:../dsh-maestro-config-lib
+        specifier: ^0.1.2
+        version: 0.1.2
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1
@@ -28,19 +28,10 @@ importers:
         specifier: ^2.0.0
         version: 2.1.9(@types/node@22.20.1)
 
-  ../dsh-maestro-config-lib:
-    devDependencies:
-      '@types/node':
-        specifier: ^22.0.0
-        version: 22.20.1
-      typescript:
-        specifier: ^5.8.0
-        version: 5.9.3
-      vitest:
-        specifier: ^2.0.0
-        version: 2.1.9(@types/node@22.20.1)
-
 packages:
+
+  '@ddtcorex/dsh-maestro-config-lib@0.1.2':
+    resolution: {integrity: sha512-z4UDTOZGZyGjwBSuCopc+cCqwZbXbSCUXZKDI/gqoq+NKTjwfXjBh21LqW6mDIxFCUraxzFahUT+HIlJ/gNDAQ==}
 
   '@deepseek-ai/cordis@4.0.1':
     resolution: {integrity: sha512-YBdskTU2Po1kru3GgcUWUbkTsPMA9LkSQDAY8rBkFJeajdgcQad3QPJZE26JyK99Xb6HaASvoXg2DSUTeN/0Nw==}
@@ -677,6 +668,8 @@ packages:
     hasBin: true
 
 snapshots:
+
+  '@ddtcorex/dsh-maestro-config-lib@0.1.2': {}
 
   '@deepseek-ai/cordis@4.0.1':
     dependencies:

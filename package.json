@@ -28,7 +28,7 @@
     }
   },
   "dependencies": {
-    "@ddtcorex/dsh-maestro-config-lib": "workspace:^0.1.2"
+    "@ddtcorex/dsh-maestro-config-lib": "^0.1.2"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"
