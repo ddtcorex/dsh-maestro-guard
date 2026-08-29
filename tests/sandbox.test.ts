@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
-import { isBlockedGitCommand } from '../src/host/sandbox.js'
+import { isBlockedGitCommand, checkSandbox } from '../src/host/sandbox.js'
 
 // Task 5: guard blocks ~/.dsh/.credentials.yaml and pnpm publish without APPROVED
 // TDD RED phase: these imports will fail until src/host/sandbox.ts is implemented
@@ -133,5 +133,20 @@ describe('sandbox: git protection', () => {
   })
   it('blocks DELETE protection', async () => {
     expect(isBlockedGitCommand('gh api -X DELETE repos/ddtcorex/foo/branches/master/protection')).toBe(true)
+  })
+})
+
+describe('sandbox: checkSandbox git', () => {
+  it('blocks exec git push master without approved', async () => {
+    expect(checkSandbox('exec', {command:'git push origin master'}, {cwd:'/tmp/p', currentBranch:'feat/x', approved:false}).blocked).toBe(true)
+  })
+  it('allows git push master when approved', async () => {
+    expect(checkSandbox('exec', {command:'git push origin master'}, {cwd:'/tmp/p', currentBranch:'feat/x', approved:true}).blocked).toBe(false)
+  })
+  it('blocks bare push on master without approved', async () => {
+    expect(checkSandbox('exec', {command:'git push'}, {cwd:'/tmp/p', currentBranch:'master', approved:false}).blocked).toBe(true)
+  })
+  it('allows git push feat branch', async () => {
+    expect(checkSandbox('exec', {command:'git push origin feat/x'}, {cwd:'/tmp/p', currentBranch:'feat/x', approved:false}).blocked).toBe(false)
   })
 })

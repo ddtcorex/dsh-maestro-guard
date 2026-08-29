@@ -97,19 +97,21 @@ export interface SandboxCheckResult {
 }
 
 /**
- * Central sandbox check. Combines credential-path, publish, and cwd containment.
+ * Central sandbox check. Combines credential-path, git-protection, publish, and cwd containment.
  * @param tool tool name (e.g. maestro_read_file, exec, bash)
  * @param args tool arguments (object, string, or unknown)
  * @param opts.cwd session cwd (exec.agent.session.header.cwd)
- * @param opts.approved whether publish is APPROVED (via ApprovalStore)
+ * @param opts.currentBranch git current branch (from getCurrentBranch)
+ * @param opts.approved whether publish/git is APPROVED (via ApprovalStore)
  */
 export function checkSandbox(
   tool: string,
   args: unknown,
-  opts?: { cwd?: string; approved?: boolean },
+  opts?: { cwd?: string; currentBranch?: string; approved?: boolean },
 ): SandboxCheckResult {
   const approved = !!opts?.approved
   const cwd = opts?.cwd
+  const currentBranch = opts?.currentBranch
 
   // Serialize args for generic substring checks
   const asText = args != null ? (typeof args === 'string' ? args : JSON.stringify(args)) : ''
@@ -120,12 +122,17 @@ export function checkSandbox(
     return { blocked: true, reason: 'credential path blocked: ~/.dsh/.credentials.yaml or ~/.cloudflared or NPM_TOKEN' }
   }
 
-  // 2) Block publish without APPROVED
+  // 2) Block git push to master/main without APPROVED (branch-aware)
+  if (isBlockedGitCommand(combined, currentBranch) && !approved) {
+    return { blocked: true, reason: 'git push to master/main blocked without APPROVED: ' + combined.slice(0, 300) }
+  }
+
+  // 3) Block publish without APPROVED
   if (isBlockedCommand(combined) && !approved) {
     return { blocked: true, reason: 'publish blocked without APPROVED: pnpm publish requires approval' }
   }
 
-  // 3) Block maestro file tools outside cwd
+  // 4) Block maestro file tools outside cwd
   const fileTools = new Set(['maestro_read_file', 'maestro_write_file', 'fs_read', 'fs_write', 'read_file', 'write_file'])
   if (cwd && fileTools.has(tool)) {
     let pathVal: string | undefined
