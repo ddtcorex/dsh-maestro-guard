@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
+import { isBlockedGitCommand } from '../src/host/sandbox.js'
 
 // Task 5: guard blocks ~/.dsh/.credentials.yaml and pnpm publish without APPROVED
 // TDD RED phase: these imports will fail until src/host/sandbox.ts is implemented
@@ -111,5 +112,26 @@ describe('sandbox: cwd containment for maestro file tools', () => {
     const payload: any = { name: 'exec', arguments: { command: 'pnpm publish --access public' } }
     const result = await handler(payload, async () => ({ kind: 'allow' as const }))
     expect(result).toEqual({ kind: 'allow' })
+  })
+})
+
+describe('sandbox: git protection', () => {
+  it('blocks git push origin master', async () => {
+    expect(isBlockedGitCommand('git push origin master')).toBe(true)
+  })
+  it('blocks bare git push when on master', async () => {
+    expect(isBlockedGitCommand('git push', 'master')).toBe(true)
+  })
+  it('allows git push origin feat/x', async () => {
+    expect(isBlockedGitCommand('git push origin feat/x', 'feat/x')).toBe(false)
+  })
+  it('blocks gh pr merge', async () => {
+    expect(isBlockedGitCommand('gh pr merge 123')).toBe(true)
+  })
+  it('blocks gh release create', async () => {
+    expect(isBlockedGitCommand('gh release create v1.2.3')).toBe(true)
+  })
+  it('blocks DELETE protection', async () => {
+    expect(isBlockedGitCommand('gh api -X DELETE repos/ddtcorex/foo/branches/master/protection')).toBe(true)
   })
 })

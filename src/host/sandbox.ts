@@ -55,6 +55,22 @@ export function isBlockedCommand(cmd: string): boolean {
   return /\b(pnpm|npm)\s+publish\b/.test(cmd)
 }
 
+export function isBlockedGitCommand(cmd: string, currentBranch?: string): boolean {
+  if (!cmd || typeof cmd !== 'string') return false
+  const lower = cmd.toLowerCase()
+  // gh pr merge always protected
+  if (/\bgh\s+pr\s+merge\b/.test(lower)) return true
+  if (/\bgh\s+release\s+(create|publish)\b/.test(lower)) return true
+  if (/gh\s+api\b.*delete.*\/branches\/(master|main)\/protection/.test(lower)) return true
+  // git push with explicit master/main target
+  if (/\bgit\s+push\b/.test(lower)) {
+    if (/\b(master|main)\b/.test(lower)) return true
+    if (currentBranch && (currentBranch === 'master' || currentBranch === 'main')) return true
+  }
+  // git tag push that includes master/main (rare) — already covered by push regex
+  return false
+}
+
 export function isPublishBlocked(cmd: string, approved: boolean): boolean {
   if (!isBlockedCommand(cmd)) return false
   return !approved
@@ -158,4 +174,4 @@ export function guard(p: string, approved?: boolean): boolean {
   return true
 }
 
-export const sandbox = { isBlockedPath, isBlockedCommand, isPublishBlocked, isOutsideCwd, checkSandbox, guard }
+export const sandbox = { isBlockedPath, isBlockedCommand, isBlockedGitCommand, isPublishBlocked, isOutsideCwd, checkSandbox, guard }
