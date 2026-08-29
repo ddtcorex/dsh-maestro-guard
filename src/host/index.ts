@@ -4,6 +4,7 @@ import { ApprovalStore } from './approval-store.js'
 import { PermissionPolicy } from './permission-policy.js'
 import { containsSecret, redact } from './secret-redactor.js'
 import { checkSandbox, isBlockedGitCommand } from './sandbox.js'
+import { apply as applyFullScan } from './full-scan-tool.js'
 import type { GuardToolExecution, GuardPreToolDecision } from './augment.js'
 
 function getCurrentBranch(cwd?: string): string | undefined {
@@ -87,6 +88,8 @@ export default {
     const store = new ApprovalStore()
     const policy = new PermissionPolicy({ deny: ['danger-tool'] })
     const handler = createGuardHandler(store, policy)
-    ctx.effect(() => ctx.on('tools/pre-execute', handler))
+    ctx.effect(() => ctx.on('tools/pre-execute', handler as any))
+    // register on-demand full-scan tool (Task 4) alongside guard handler
+    applyFullScan(ctx, {})
   }
 }
