@@ -47,6 +47,9 @@ export function apply(ctx: Context, config:{rootPath?:string}={}) {
     async execute(args:any, exec:unknown) {
       const root = workspaceRootFor((args as any)?.rootPath ?? config.rootPath, exec)
       const script = resolveScript(root)
+      if (!existsSync(script)) {
+        return {ok: true, report: `enforce-rules: no script found at ${script} (standalone repo, skipping)`, code: 0}
+      }
       const run = (extra:string[])=>{
         const r=spawnSync('node', [script, ...extra], {encoding:'utf-8', timeout: 30000})
         return {code: r.status??0, out: (r.stdout??'')+(r.stderr??'')}
