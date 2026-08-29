@@ -177,3 +177,15 @@ describe('guard handler git-protection', () => {
     expect(res).toEqual({ kind: 'allow' })
   })
 })
+
+describe('sandbox: config-driven (Task 2)', () => {
+  it('respects custom credentialPaths from config', async () => {
+    expect(checkSandbox('exec', { path: '~/.aws/credentials' }, { cwd: '/tmp/p', credentialPaths: ['~/.aws/credentials'] }).blocked).toBe(true)
+  })
+  it('allows git push to develop when branches=[master]', async () => {
+    expect(checkSandbox('exec', { command: 'git push origin develop' }, { cwd: '/tmp/p', currentBranch: 'develop', gitProtection: { enabled: true, branches: ['master'] } }).blocked).toBe(false)
+  })
+  it('allows git push to main when branches=[master] (custom credential test)', async () => {
+    expect(checkSandbox('exec', { command: 'git push origin main' }, { cwd: '/tmp/p', currentBranch: 'main', gitProtection: { enabled: true, branches: ['master'] } }).blocked).toBe(false)
+  })
+})

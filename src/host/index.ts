@@ -27,6 +27,35 @@ function getSessionCwd(exec: unknown): string | undefined {
   )
 }
 
+async function readGuardConfig(): Promise<Record<string, unknown>> {
+  try {
+    const mod: any = await import('@ddtcorex/dsh-maestro-config-lib')
+    if (typeof mod.load === 'function') {
+      try {
+        const doc = await mod.load()
+        if (doc?.domains?.guard && typeof doc.domains.guard === 'object' && !Array.isArray(doc.domains.guard)) {
+          return doc.domains.guard as Record<string, unknown>
+        }
+      } catch {}
+    }
+    if (typeof mod.get === 'function') {
+      try {
+        const g = await mod.get('guard')
+        if (g && typeof g === 'object' && !Array.isArray(g)) return g as Record<string, unknown>
+      } catch {}
+    }
+    if (typeof mod.readFlat === 'function') {
+      try {
+        const flat = await mod.readFlat()
+        if (flat && typeof flat === 'object' && (flat as any).guard && typeof (flat as any).guard === 'object') {
+          return (flat as any).guard as Record<string, unknown>
+        }
+      } catch {}
+    }
+  } catch {}
+  return {}
+}
+
 export function createGuardHandler(store: ApprovalStore, policy: PermissionPolicy) {
   return async (exec: GuardToolExecution, next: () => Promise<GuardPreToolDecision>): Promise<GuardPreToolDecision> => {
     const tool = (exec as GuardToolExecution).name ?? (exec as GuardToolExecution).tool ?? ''
@@ -38,7 +67,18 @@ export function createGuardHandler(store: ApprovalStore, policy: PermissionPolic
     const asTextForSandbox = rawArgs != null ? JSON.stringify(rawArgs) : ''
     const combinedForCheck = `${tool} ${asTextForSandbox}`
     const combinedForPublish = combinedForCheck
-    const isPublish = /\b(pnpm|npm)\s+publish\b/.test(combinedForPublish)
+    // Read guard config at runtime (injected lists) — fallback to defaults when empty
+    const guardCfg = await readGuardConfig().catch(() => ({} as Record<string, unknown>))
+    const credentialPaths = Array.isArray((guardCfg as any).credentialPaths) ? (guardCfg as any).credentialPaths as string[] : undefined
+    const gitProtection = (guardCfg as any).gitProtection && typeof (guardCfg as any).gitProtection === 'object' ? (guardCfg as any).gitProtection as { enabled: boolean; branches: string[] } : undefined
+    const publishBlocked = typeof (guardCfg as any).publishBlocked === 'boolean' ? (guardCfg as any).publishBlocked as boolean : undefined
+    const cwdContainment = typeof (guardCfg as any).cwdContainment === 'boolean' ? (guardCfg as any).cwdContainment as boolean : undefined
+
+    const publishBlockedEffective = publishBlocked ?? true
+    const gitEnabled = gitProtection?.enabled ?? true
+    const branches = gitProtection?.branches ?? ['master', 'main']
+
+    const isPublish = publishBlockedEffective ? /\b(pnpm|npm)\s+publish\b/.test(combinedForPublish) : false
     let approvedForPublish = false
     if (isPublish) {
       approvedForPublish =
@@ -47,7 +87,7 @@ export function createGuardHandler(store: ApprovalStore, policy: PermissionPolic
         (await store.isApproved('pnpm publish')) ||
         (await store.isApproved(tool))
     }
-    const isGitProtected = isBlockedGitCommand(combinedForCheck, currentBranch)
+    const isGitProtected = gitEnabled ? isBlockedGitCommand(combinedForCheck, currentBranch, branches) : false
     let approvedForGit = false
     if (isGitProtected) {
       approvedForGit =
@@ -59,6 +99,10 @@ export function createGuardHandler(store: ApprovalStore, policy: PermissionPolic
       cwd,
       currentBranch,
       approved: isGitProtected ? approvedForGit : approvedForPublish,
+      credentialPaths,
+      gitProtection,
+      publishBlocked,
+      cwdContainment,
     })
     if (sandboxRes.blocked) {
       throw new Error(`Guard: ${sandboxRes.reason}`)

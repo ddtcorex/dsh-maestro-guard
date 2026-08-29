@@ -21,19 +21,21 @@ function normalizePath(p: string): string {
 /**
  * True if path points to a blocked credential / secret location.
  * Covers: ~/.dsh/.credentials.yaml (any expansion), ~/.cloudflared, NPM_TOKEN, .credentials.yaml substring
+ * credentialPaths: additional custom paths from config (guard.credentialPaths) — merged with always-blocked defaults.
+ * The 3 always-blocked substrings stay blocked even when credentialPaths is empty.
  */
-export function isBlockedPath(input: string): boolean {
+export function isBlockedPath(input: string, credentialPaths?: string[]): boolean {
   if (!input || typeof input !== 'string') return false
   const trimmed = input.trim()
   if (!trimmed) return false
 
-  // Direct substring checks (covers JSON-stringified args, env leakage, etc.)
+  // Direct substring checks (covers JSON-stringified args, env leakage, etc.) — always blocked
   if (trimmed.includes('.credentials.yaml')) return true
   if (trimmed.includes('.cloudflared')) return true
   if (trimmed.includes('NPM_TOKEN')) return true
   if (trimmed.includes('.dsh') && trimmed.includes('credentials')) return true
 
-  // Normalized expanded check
+  // Normalized expanded check for defaults
   const norm = normalizePath(trimmed)
   if (norm.includes('.credentials.yaml')) return true
   if (norm.includes('.cloudflared')) return true
@@ -42,6 +44,20 @@ export function isBlockedPath(input: string): boolean {
   if (norm === absCred || norm.startsWith(absCred)) return true
   const absCf = join(homedir(), '.cloudflared')
   if (norm === absCf || norm.startsWith(absCf + '/') || norm.includes('.cloudflared')) return true
+
+  // Injected credentialPaths from config (additional) — substring + normalized + prefix
+  if (credentialPaths && credentialPaths.length > 0) {
+    for (const p of credentialPaths) {
+      if (!p || typeof p !== 'string') continue
+      const t = p.trim()
+      if (!t) continue
+      if (trimmed.includes(t)) return true
+      const normP = normalizePath(t)
+      if (norm.includes(normP)) return true
+      if (norm === normP) return true
+      if (norm.startsWith(normP + '/')) return true
+    }
+  }
 
   return false
 }
@@ -55,19 +71,33 @@ export function isBlockedCommand(cmd: string): boolean {
   return /\b(pnpm|npm)\s+publish\b/.test(cmd)
 }
 
-export function isBlockedGitCommand(cmd: string, currentBranch?: string): boolean {
+export function isBlockedGitCommand(cmd: string, currentBranch?: string, branches?: string[]): boolean {
   if (!cmd || typeof cmd !== 'string') return false
   const lower = cmd.toLowerCase()
   // gh pr merge always protected
   if (/\bgh\s+pr\s+merge\b/.test(lower)) return true
   if (/\bgh\s+release\s+(create|publish)\b/.test(lower)) return true
-  if (/gh\s+api\b.*delete.*\/branches\/(master|main)\/protection/.test(lower)) return true
-  // git push with explicit master/main target
-  if (/\bgit\s+push\b/.test(lower)) {
-    if (/\b(master|main)\b/.test(lower)) return true
-    if (currentBranch && (currentBranch === 'master' || currentBranch === 'main')) return true
+  const effectiveBranches = branches && branches.length > 0 ? branches : ['master', 'main']
+  const lowerBranches = effectiveBranches.map((b) => b.toLowerCase())
+  // gh api delete protection with dynamic branches
+  for (const b of lowerBranches) {
+    const esc = b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const re = new RegExp(`gh\\s+api\\b.*delete.*\\/branches\\/${esc}\\/protection`)
+    if (re.test(lower)) return true
   }
-  // git tag push that includes master/main (rare) — already covered by push regex
+  // git push with explicit protected branch target or when current branch is protected
+  if (/\bgit\s+push\b/.test(lower)) {
+    for (const b of lowerBranches) {
+      const esc = b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const branchWordRe = new RegExp(`\\b${esc}\\b`)
+      if (branchWordRe.test(lower)) return true
+    }
+    if (currentBranch) {
+      const curLower = currentBranch.toLowerCase()
+      if (lowerBranches.includes(curLower)) return true
+    }
+  }
+  // git tag push that includes protected branch (rare) — already covered by push regex
   return false
 }
 
@@ -96,6 +126,16 @@ export interface SandboxCheckResult {
   reason?: string
 }
 
+export interface CheckSandboxOpts {
+  cwd?: string
+  currentBranch?: string
+  approved?: boolean
+  credentialPaths?: string[]
+  gitProtection?: { enabled: boolean; branches: string[] }
+  publishBlocked?: boolean
+  cwdContainment?: boolean
+}
+
 /**
  * Central sandbox check. Combines credential-path, git-protection, publish, and cwd containment.
  * @param tool tool name (e.g. maestro_read_file, exec, bash)
@@ -103,38 +143,48 @@ export interface SandboxCheckResult {
  * @param opts.cwd session cwd (exec.agent.session.header.cwd)
  * @param opts.currentBranch git current branch (from getCurrentBranch)
  * @param opts.approved whether publish/git is APPROVED (via ApprovalStore)
+ * @param opts.credentialPaths additional blocked credential paths from guard config
+ * @param opts.gitProtection git protection toggle + branches from guard config
+ * @param opts.publishBlocked whether publish is blocked (default true)
+ * @param opts.cwdContainment whether cwd containment is enforced (default true)
  */
 export function checkSandbox(
   tool: string,
   args: unknown,
-  opts?: { cwd?: string; currentBranch?: string; approved?: boolean },
+  opts?: CheckSandboxOpts,
 ): SandboxCheckResult {
   const approved = !!opts?.approved
   const cwd = opts?.cwd
   const currentBranch = opts?.currentBranch
+  const credentialPaths = opts?.credentialPaths
+  const gitProtection = opts?.gitProtection
+  const publishBlocked = opts?.publishBlocked ?? true
+  const cwdContainment = opts?.cwdContainment ?? true
 
   // Serialize args for generic substring checks
   const asText = args != null ? (typeof args === 'string' ? args : JSON.stringify(args)) : ''
   const combined = `${tool ?? ''} ${asText}`
 
-  // 1) Block credential paths anywhere in tool+args
-  if (isBlockedPath(tool) || isBlockedPath(asText) || isBlockedPath(combined)) {
+  // 1) Block credential paths anywhere in tool+args (always, with injected list)
+  if (isBlockedPath(tool, credentialPaths) || isBlockedPath(asText, credentialPaths) || isBlockedPath(combined, credentialPaths)) {
     return { blocked: true, reason: 'credential path blocked: ~/.dsh/.credentials.yaml or ~/.cloudflared or NPM_TOKEN' }
   }
 
-  // 2) Block git push to master/main without APPROVED (branch-aware)
-  if (isBlockedGitCommand(combined, currentBranch) && !approved) {
+  // 2) Block git push to protected branches without APPROVED (branch-aware, toggle-aware)
+  const gitEnabled = gitProtection?.enabled ?? true
+  const branches = gitProtection?.branches ?? ['master', 'main']
+  if (gitEnabled && isBlockedGitCommand(combined, currentBranch, branches) && !approved) {
     return { blocked: true, reason: 'git push to master/main blocked without APPROVED: ' + combined.slice(0, 300) }
   }
 
-  // 3) Block publish without APPROVED
-  if (isBlockedCommand(combined) && !approved) {
+  // 3) Block publish without APPROVED (toggle-aware)
+  if (publishBlocked && isBlockedCommand(combined) && !approved) {
     return { blocked: true, reason: 'publish blocked without APPROVED: pnpm publish requires approval' }
   }
 
-  // 4) Block maestro file tools outside cwd
+  // 4) Block maestro file tools outside cwd (toggle-aware)
   const fileTools = new Set(['maestro_read_file', 'maestro_write_file', 'fs_read', 'fs_write', 'read_file', 'write_file'])
-  if (cwd && fileTools.has(tool)) {
+  if (cwdContainment && cwd && fileTools.has(tool)) {
     let pathVal: string | undefined
     if (typeof args === 'object' && args !== null) {
       const a = args as Record<string, unknown>
@@ -151,7 +201,7 @@ export function checkSandbox(
       pathVal = args
     }
     if (pathVal) {
-      if (isBlockedPath(pathVal)) {
+      if (isBlockedPath(pathVal, credentialPaths)) {
         return { blocked: true, reason: `credential path blocked: ${pathVal}` }
       }
       if (isOutsideCwd(pathVal, cwd)) {
