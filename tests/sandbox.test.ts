@@ -150,3 +150,30 @@ describe('sandbox: checkSandbox git', () => {
     expect(checkSandbox('exec', {command:'git push origin feat/x'}, {cwd:'/tmp/p', currentBranch:'feat/x', approved:false}).blocked).toBe(false)
   })
 })
+
+describe('guard handler git-protection', () => {
+  it('guard handler blocks git push origin master without APPROVED', async () => {
+    const { createGuardHandler } = await import('../src/host/index.js')
+    const { ApprovalStore } = await import('../src/host/approval-store.js')
+    const { PermissionPolicy } = await import('../src/host/permission-policy.js')
+    const dir = await mkdtemp(join(tmpdir(), 'g-git-'))
+    const store = new ApprovalStore(dir)
+    const policy = new PermissionPolicy({})
+    const handler = createGuardHandler(store, policy)
+    const payload: any = { name: 'exec', arguments: { command: 'git push origin master' } }
+    await expect(handler(payload, async () => ({ kind: 'allow' as const }))).rejects.toThrow(/master.*APPROVED|git.*blocked/i)
+  })
+  it('guard handler allows git push origin master when APPROVED', async () => {
+    const { createGuardHandler } = await import('../src/host/index.js')
+    const { ApprovalStore } = await import('../src/host/approval-store.js')
+    const { PermissionPolicy } = await import('../src/host/permission-policy.js')
+    const dir = await mkdtemp(join(tmpdir(), 'g-git-ok-'))
+    const store = new ApprovalStore(dir)
+    await store.approve('git-protection')
+    const policy = new PermissionPolicy({})
+    const handler = createGuardHandler(store, policy)
+    const payload: any = { name: 'exec', arguments: { command: 'git push origin master' } }
+    const res = await handler(payload, async () => ({ kind: 'allow' as const }))
+    expect(res).toEqual({ kind: 'allow' })
+  })
+})

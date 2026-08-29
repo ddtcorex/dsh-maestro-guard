@@ -1,10 +1,19 @@
-// src/index.ts
+import { execSync } from 'node:child_process'
 import type { Context } from '@deepseek-ai/cordis'
 import { ApprovalStore } from './approval-store.js'
 import { PermissionPolicy } from './permission-policy.js'
 import { containsSecret, redact } from './secret-redactor.js'
-import { checkSandbox } from './sandbox.js'
+import { checkSandbox, isBlockedGitCommand } from './sandbox.js'
 import type { GuardToolExecution, GuardPreToolDecision } from './augment.js'
+
+function getCurrentBranch(cwd?: string): string | undefined {
+  if (!cwd) return undefined
+  try {
+    return execSync('git branch --show-current', { cwd, timeout: 800, encoding: 'utf-8' }).trim() || undefined
+  } catch {
+    return undefined
+  }
+}
 
 function getSessionCwd(exec: unknown): string | undefined {
   const e: any = exec as any
@@ -22,9 +31,12 @@ export function createGuardHandler(store: ApprovalStore, policy: PermissionPolic
     const tool = (exec as GuardToolExecution).name ?? (exec as GuardToolExecution).tool ?? ''
     const rawArgs = (exec as any)?.args ?? (exec as any)?.arguments
 
-    // Sandbox hard gate: credential paths, ~/.cloudflared, NPM_TOKEN, publish without APPROVED, cwd containment
+    // Sandbox hard gate: credential paths, ~/.cloudflared, NPM_TOKEN, git-protection, publish, cwd (via checkSandbox)
+    const cwd = getSessionCwd(exec)
+    const currentBranch = cwd ? getCurrentBranch(cwd) : undefined
     const asTextForSandbox = rawArgs != null ? JSON.stringify(rawArgs) : ''
-    const combinedForPublish = `${tool} ${asTextForSandbox}`
+    const combinedForCheck = `${tool} ${asTextForSandbox}`
+    const combinedForPublish = combinedForCheck
     const isPublish = /\b(pnpm|npm)\s+publish\b/.test(combinedForPublish)
     let approvedForPublish = false
     if (isPublish) {
@@ -34,8 +46,19 @@ export function createGuardHandler(store: ApprovalStore, policy: PermissionPolic
         (await store.isApproved('pnpm publish')) ||
         (await store.isApproved(tool))
     }
-    const cwd = getSessionCwd(exec)
-    const sandboxRes = checkSandbox(tool, rawArgs, { cwd, approved: approvedForPublish })
+    const isGitProtected = isBlockedGitCommand(combinedForCheck, currentBranch)
+    let approvedForGit = false
+    if (isGitProtected) {
+      approvedForGit =
+        (await store.isApproved('git-protection')) ||
+        (await store.isApproved('publish')) ||
+        (await store.isApproved(tool))
+    }
+    const sandboxRes = checkSandbox(tool, rawArgs, {
+      cwd,
+      currentBranch,
+      approved: isGitProtected ? approvedForGit : approvedForPublish,
+    })
     if (sandboxRes.blocked) {
       throw new Error(`Guard: ${sandboxRes.reason}`)
     }
