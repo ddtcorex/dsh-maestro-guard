@@ -5,6 +5,7 @@ import { PermissionPolicy } from './permission-policy.js'
 import { PendingStore } from './pending.js'
 import { containsSecret, redact } from './secret-redactor.js'
 import { checkSandbox, isBlockedGitCommand } from './sandbox.js'
+import { createGuardRpcHandler } from './rpc.js'
 import { apply as applyFullScan } from './full-scan-tool.js'
 import type { GuardToolExecution, GuardPreToolDecision } from './augment.js'
 
@@ -142,14 +143,17 @@ export function createGuardHandler(store: ApprovalStore, policy: PermissionPolic
 }
 
 export default {
-  inject: ['tools'] as const,
+  inject: ['tools', 'connection'] as const,
   apply(ctx: Context) {
     const store = new ApprovalStore()
     const pending = new PendingStore()
     const policy = new PermissionPolicy({ deny: ['danger-tool'] })
     const handler = createGuardHandler(store, policy, pending)
     ctx.effect(() => ctx.on('tools/pre-execute', handler as any))
-    // register on-demand full-scan tool (Task 4) alongside guard handler
+    ctx.effect(
+      () => ctx.connection.rpc.handle('/dsh-maestro-guard', createGuardRpcHandler({ store, pending }) as any, { authority: 'loopback' }),
+      'guard: approvals rpc',
+    )
     applyFullScan(ctx, {})
   }
 }

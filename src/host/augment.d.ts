@@ -7,4 +7,11 @@ declare module '@deepseek-ai/cordis' {
   interface Events {
     'tools/pre-execute'(exec: GuardToolExecution, next: () => Promise<GuardPreToolDecision>): Promise<GuardPreToolDecision>
   }
+  interface Context {
+    connection: {
+      rpc: {
+        handle: (channel: string, handler: (endpoint: string, payload: unknown) => Promise<unknown>, opts?: unknown) => () => void
+      }
+    }
+  }
 }

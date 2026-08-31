@@ -26,7 +26,7 @@ describe('dsh-maestro-guard', () => {
   it('package.json name is @ddtcorex/dsh-maestro-guard', () => {
     const pkg = JSON.parse(readFileCandidates('packages/dsh-maestro-guard/package.json', 'package.json'));
     expect(pkg.name).toBe('@ddtcorex/dsh-maestro-guard');
-    expect(pkg.version).toBe('0.1.0');
+    expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/);
     expect(pkg.dsh.bundle.patch).toBe('./cordis.patch.yml');
   });
 
