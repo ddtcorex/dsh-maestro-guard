@@ -100,6 +100,75 @@ describe('guard handler pending records', () => {
     const reqs = await pending.list()
     expect(reqs[0].scope).toBe('publish')
   })
+  it('approval allowed-once persists the grant and passes through', async () => {
+    const { createGuardHandler } = await import('../src/host/index.js')
+    const { PendingStore } = await import('../src/host/pending.js')
+    const dir = await mkdtemp(join(tmpdir(), 'g-'))
+    const store = new ApprovalStore(dir)
+    const pending = new PendingStore(dir)
+    const policy = new PermissionPolicy({})
+    const asked: any[] = []
+    const approval = { request: async (req: any) => { asked.push(req); return 'allowed-once' as const } }
+    const handler = createGuardHandler(store, policy, pending, approval)
+    const payload: any = { name: 'bash', arguments: { command: mergeCmd, cwd: dir }, agent: { session: { id: 's-1' } } }
+    let nextCalled = false
+    await handler(payload, async () => { nextCalled = true; return { kind: 'allow' as const } })
+    expect(nextCalled).toBe(true)
+    expect(await store.isApproved('git-protection')).toBe(true)
+    expect(await pending.list()).toHaveLength(0)
+    expect(asked.length).toBe(1)
+    expect(asked[0].toolName).toBe('bash')
+    expect(String(asked[0].reason)).toContain('git-protection')
+  })
+  it('approval rejected falls back to record + throw with policy hint', async () => {
+    const { createGuardHandler } = await import('../src/host/index.js')
+    const { PendingStore } = await import('../src/host/pending.js')
+    const dir = await mkdtemp(join(tmpdir(), 'g-'))
+    const store = new ApprovalStore(dir)
+    const pending = new PendingStore(dir)
+    const policy = new PermissionPolicy({})
+    const approval = { request: async () => 'rejected' as const }
+    const handler = createGuardHandler(store, policy, pending, approval)
+    const payload: any = { name: 'bash', arguments: { command: mergeCmd, cwd: dir }, agent: { session: { id: 's-1' } } }
+    let err: any
+    try { await handler(payload, async () => ({ kind: 'allow' as const })) } catch (e) { err = e }
+    expect(err).toBeDefined()
+    expect(String(err.message)).toContain('request g-')
+    const reqs = await pending.list()
+    expect(reqs.length).toBe(1)
+    expect(await store.isApproved('git-protection')).toBe(false)
+  })
+  it('no approval service falls back to record + throw (no ask)', async () => {
+    const { createGuardHandler } = await import('../src/host/index.js')
+    const { PendingStore } = await import('../src/host/pending.js')
+    const dir = await mkdtemp(join(tmpdir(), 'g-'))
+    const store = new ApprovalStore(dir)
+    const pending = new PendingStore(dir)
+    const policy = new PermissionPolicy({})
+    const handler = createGuardHandler(store, policy, pending, () => undefined)
+    const payload: any = { name: 'bash', arguments: { command: mergeCmd, cwd: dir }, agent: { session: { id: 's-1' } } }
+    let err: any
+    try { await handler(payload, async () => ({ kind: 'allow' as const })) } catch (e) { err = e }
+    expect(err).toBeDefined()
+    expect(await pending.list()).toHaveLength(1)
+  })
+  it('lazy approval factory is consulted per call', async () => {
+    const { createGuardHandler } = await import('../src/host/index.js')
+    const { PendingStore } = await import('../src/host/pending.js')
+    const dir = await mkdtemp(join(tmpdir(), 'g-'))
+    const store = new ApprovalStore(dir)
+    const pending = new PendingStore(dir)
+    const policy = new PermissionPolicy({})
+    let calls = 0
+    const handler = createGuardHandler(store, policy, pending, () => {
+      calls += 1
+      return { request: async () => 'allowed-once' as const }
+    })
+    const payload: any = { name: 'bash', arguments: { command: pubCmd, cwd: dir }, agent: { session: { id: 's-1' } } }
+    await handler(payload, async () => ({ kind: 'allow' as const }))
+    expect(calls).toBe(1)
+    expect(await store.isApproved('publish')).toBe(true)
+  })
 })
 
 describe('guard handler via createGuardHandler', () => {

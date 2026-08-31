@@ -13,5 +13,9 @@ declare module '@deepseek-ai/cordis' {
         handle: (channel: string, handler: (endpoint: string, payload: unknown) => Promise<unknown>, opts?: unknown) => () => void
       }
     }
+    /** Optional harness approval seam; the guard resolves it lazily via ctx.get('approval'). */
+    approval: {
+      request(req: { agent: unknown; toolName: string; callId?: string; reason?: string }): Promise<'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'>
+    }
   }
 }

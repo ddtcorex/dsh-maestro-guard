@@ -58,7 +58,17 @@ async function readGuardConfig(): Promise<Record<string, unknown>> {
   return {}
 }
 
-export function createGuardHandler(store: ApprovalStore, policy: PermissionPolicy, pending: PendingStore) {
+export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
+export type ApprovalLike = {
+  request(req: { agent: unknown; toolName: string; callId?: string; reason?: string }): Promise<ApprovalOutcome>
+}
+
+export function createGuardHandler(
+  store: ApprovalStore,
+  policy: PermissionPolicy,
+  pending: PendingStore,
+  approval?: ApprovalLike | (() => ApprovalLike | undefined),
+) {
   return async (exec: GuardToolExecution, next: () => Promise<GuardPreToolDecision>): Promise<GuardPreToolDecision> => {
     const tool = (exec as GuardToolExecution).name ?? (exec as GuardToolExecution).tool ?? ''
     const rawArgs = (exec as any)?.args ?? (exec as any)?.arguments
@@ -107,21 +117,41 @@ export function createGuardHandler(store: ApprovalStore, policy: PermissionPolic
       cwdContainment,
     })
     if (sandboxRes.blocked) {
-      try {
-        const scope: 'git-protection' | 'publish' = sandboxRes.reason?.includes('publish') ? 'publish' : 'git-protection'
-        const req = await pending.record({
-          scope,
-          tool,
-          command: redact(combinedForCheck.slice(0, 300)),
-          reason: sandboxRes.reason ?? 'blocked',
-          sessionId: (exec as any)?.agent?.session?.id ?? undefined,
-          cwd,
+      const scope: 'git-protection' | 'publish' = sandboxRes.reason?.includes('publish') ? 'publish' : 'git-protection'
+      const agent = (exec as any)?.agent
+      const current = typeof approval === 'function' ? approval() : approval
+      let granted = false
+      if (current !== undefined && agent !== undefined) {
+        const outcome = await current.request({
+          agent,
+          toolName: tool,
+          ...(exec as any)?.callId !== undefined ? { callId: (exec as any).callId } : {},
+          reason: `Guard: ${sandboxRes.reason} — grant scope ${scope} (persists until revoked)`,
         })
-        throw new Error(`Guard: ${sandboxRes.reason} — approve in Maestro Settings → Guard (request ${req.id}, scope ${scope})`)
-      } catch (e) {
-        if (e instanceof Error && e.message.startsWith('Guard:')) throw e
-        throw new Error(`Guard: ${sandboxRes.reason}`)
+        if (outcome === 'allowed-once') {
+          await store.approve(scope)
+          granted = true
+        }
       }
+      if (!granted) {
+        try {
+          const req = await pending.record({
+            scope,
+            tool,
+            command: redact(combinedForCheck.slice(0, 300)),
+            reason: sandboxRes.reason ?? 'blocked',
+            sessionId: (exec as any)?.agent?.session?.id ?? undefined,
+            cwd,
+          })
+          throw new Error(
+            `Guard: ${sandboxRes.reason} — approval not granted. Enable session approval prompts (permission preset with approval ask) or approve request ${req.id} (scope ${scope}) in Settings → Guard`,
+          )
+        } catch (e) {
+          if (e instanceof Error && e.message.startsWith('Guard:')) throw e
+          throw new Error(`Guard: ${sandboxRes.reason}`)
+        }
+      }
+      // granted: fall through to the shared tail (policy check, secret redaction, next())
     }
 
     if (!policy.isAllowed(tool, rawArgs)) {
@@ -148,7 +178,7 @@ export default {
     const store = new ApprovalStore()
     const pending = new PendingStore()
     const policy = new PermissionPolicy({ deny: ['danger-tool'] })
-    const handler = createGuardHandler(store, policy, pending)
+    const handler = createGuardHandler(store, policy, pending, () => (ctx.get('approval') as unknown as ApprovalLike | undefined))
     ctx.effect(() => ctx.on('tools/pre-execute', handler as any))
     ctx.effect(
       () => ctx.connection.rpc.handle('/dsh-maestro-guard', createGuardRpcHandler({ store, pending }) as any, { authority: 'loopback' }),
