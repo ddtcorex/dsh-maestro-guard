@@ -49,6 +49,59 @@ describe('guard waterfall', () => {
   })
 });
 
+describe('guard handler pending records', () => {
+  const mergeCmd = ['gh', 'pr', 'merge', '4'].join(' ')
+  const pubCmd = ['pnpm', 'publish'].join(' ')
+  it('blocked merge records a request and the error names the request id', async () => {
+    const { createGuardHandler } = await import('../src/host/index.js')
+    const { PendingStore } = await import('../src/host/pending.js')
+    const dir = await mkdtemp(join(tmpdir(), 'g-'))
+    const store = new ApprovalStore(dir)
+    const pending = new PendingStore(dir)
+    const policy = new PermissionPolicy({})
+    const handler = createGuardHandler(store, policy, pending)
+    const payload: any = { name: 'bash', arguments: { command: mergeCmd, cwd: dir } }
+    let err: any
+    try { await handler(payload, async () => ({ kind: 'allow' as const })) } catch (e) { err = e }
+    expect(err).toBeDefined()
+    expect(String(err.message)).toContain('request g-')
+    expect(String(err.message)).toContain('git-protection')
+    const reqs = await pending.list()
+    expect(reqs.length).toBe(1)
+    expect(reqs[0].scope).toBe('git-protection')
+  })
+  it('approved scope lets the same invocation pass through to next()', async () => {
+    const { createGuardHandler } = await import('../src/host/index.js')
+    const { PendingStore } = await import('../src/host/pending.js')
+    const dir = await mkdtemp(join(tmpdir(), 'g-'))
+    const store = new ApprovalStore(dir)
+    await store.approve('git-protection')
+    const pending = new PendingStore(dir)
+    const policy = new PermissionPolicy({})
+    const handler = createGuardHandler(store, policy, pending)
+    const payload: any = { name: 'bash', arguments: { command: mergeCmd, cwd: dir } }
+    let nextCalled = false
+    await handler(payload, async () => { nextCalled = true; return { kind: 'allow' as const } })
+    expect(nextCalled).toBe(true)
+    expect(await pending.list()).toHaveLength(0)
+  })
+  it('blocked publish records scope publish', async () => {
+    const { createGuardHandler } = await import('../src/host/index.js')
+    const { PendingStore } = await import('../src/host/pending.js')
+    const dir = await mkdtemp(join(tmpdir(), 'g-'))
+    const store = new ApprovalStore(dir)
+    const pending = new PendingStore(dir)
+    const policy = new PermissionPolicy({})
+    const handler = createGuardHandler(store, policy, pending)
+    const payload: any = { name: 'bash', arguments: { command: pubCmd, cwd: dir } }
+    let err: any
+    try { await handler(payload, async () => ({ kind: 'allow' as const })) } catch (e) { err = e }
+    expect(err).toBeDefined()
+    const reqs = await pending.list()
+    expect(reqs[0].scope).toBe('publish')
+  })
+})
+
 describe('guard handler via createGuardHandler', () => {
   it('deny-path throws for denied tool', async () => {
     const { createGuardHandler } = await import('../src/host/index.js')
