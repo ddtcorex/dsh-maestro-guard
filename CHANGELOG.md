@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-09-01
+
+### Fixed
+
+- Legacy tickets recorded before the TTL existed (no `expiresAt`) now expire
+  at `requestedAt` + TTL instead of lingering as pending forever.
+- TDD-seeded regression tests for legacy-ticket expiry (106 tests).
+
 ## [0.2.1] - 2026-09-01
 
 ### Fixed
