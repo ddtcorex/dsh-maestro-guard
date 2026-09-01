@@ -128,7 +128,7 @@ describe('guard handler chat-approve tickets', () => {
     const store = new ApprovalStore(dir)
     const pending = new PendingStore(dir)
     const policy = new PermissionPolicy({})
-    return { store, pending, policy, handler: createGuardHandler(store, policy, pending) }
+    return { store, pending, policy, handler: createGuardHandler(store, policy, pending, async () => ({})) }
   }
   it('blocked merge records a ticket and the error names the id', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'g-'))

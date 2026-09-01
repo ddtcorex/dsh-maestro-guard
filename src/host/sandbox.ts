@@ -65,6 +65,42 @@ export function isBlockedPath(input: string, credentialPaths?: string[]): boolea
 /**
  * True if command string is a publish command (pnpm|npm publish)
  */
+/**
+ * Resolve the working directory a command actually executes in, when it names
+ * one explicitly (cd <dir> / git -C <dir>). Falls back to the passed cwd when
+ * the command has no explicit target — preserving the historical session-cwd
+ * semantics for commands that run in place.
+ */
+export function getCommandWorkingDir(command: string | undefined, cwd: string | undefined): string | undefined {
+  if (!command || !cwd) return cwd ?? undefined
+  const cd = /\bcd\s+([^\s;&|"'`${}]+)(?:\s*(?:[;&|]|$))/.exec(command)
+  const c = /\bgit\s+-C\s+([^\s;&|"'`${}]+)/.exec(command)
+  const dir = cd?.[1] ?? c?.[1]
+  if (!dir) return cwd
+  if (dir === '~') return homedir()
+  if (dir.startsWith('~/')) return join(homedir(), dir.slice(2))
+  return resolve(cwd, dir)
+}
+
+/**
+ * Choose the branch used for protected-branch detection: the branch of the repo
+ * the command targets (via `getCommandWorkingDir`), falling back to the session
+ * cwd when the command runs in place. If the command cd's into a directory that
+ * is not a git repo, no protected branch applies (the push would fail there
+ * anyway) — do NOT fall back to the session cwd, that reintroduces the
+ * false-positive where a feature-branch push inside a sub-repo is blocked
+ * because the session cwd repo happens to sit on master.
+ */
+export function resolveCurrentBranch(
+  command: string | undefined,
+  sessionCwd: string | undefined,
+  branchOf: (dir: string) => string | undefined,
+): string | undefined {
+  const dir = getCommandWorkingDir(command, sessionCwd)
+  if (!dir) return undefined
+  return branchOf(dir)
+}
+
 export function isBlockedCommand(cmd: string): boolean {
   if (!cmd || typeof cmd !== 'string') return false
   // detect "pnpm publish" or "npm publish" as whole word sequence
