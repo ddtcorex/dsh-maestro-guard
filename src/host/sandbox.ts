@@ -160,11 +160,17 @@ export function isBlockedGitCommand(cmd: string, currentBranch?: string, branche
       const re = new RegExp(`gh\\s+api\\b.*delete.*\\/branches\\/${escBranch(b)}\\/protection`)
       if (re.test(lower)) return true
     }
-    // git push: protected branch word in THIS segment, or checked out on one
+    // git push: protected branch word in THIS segment, checked out on one, or
+    // pushing a release tag (version tags trigger the CI publish workflow and
+    // must follow the same human-approval rule as gh release create)
     if (/\bgit\s+push\b/.test(lower)) {
       for (const b of lowerBranches) {
         if (new RegExp(`\\b${escBranch(b)}\\b`).test(lower)) return true
       }
+      if (/refs\/tags\//.test(lower)) return true
+      // semver-like tag as a push refspec: standalone token (space/start
+      // preceded), so a branch name like feat/1.2.3 is not a false positive
+      if (/(?:^|\s)v?\d+\.\d+\.\d+(?:[-+][0-9a-z.]+)?\b/.test(lower)) return true
       if (currentBranch) {
         const curLower = currentBranch.toLowerCase()
         if (lowerBranches.includes(curLower)) return true
