@@ -2,6 +2,7 @@ import { execSync } from 'node:child_process'
 import type { Context } from '@deepseek-ai/cordis'
 import { ApprovalStore } from './approval-store.js'
 import { PermissionPolicy } from './permission-policy.js'
+import { PendingStore, ticketHash } from './pending.js'
 import { containsSecret, redact } from './secret-redactor.js'
 import { checkSandbox, isBlockedGitCommand } from './sandbox.js'
 import { apply as applyFullScan } from './full-scan-tool.js'
@@ -56,7 +57,7 @@ async function readGuardConfig(): Promise<Record<string, unknown>> {
   return {}
 }
 
-export function createGuardHandler(store: ApprovalStore, policy: PermissionPolicy) {
+export function createGuardHandler(store: ApprovalStore, policy: PermissionPolicy, pending: PendingStore) {
   return async (exec: GuardToolExecution, next: () => Promise<GuardPreToolDecision>): Promise<GuardPreToolDecision> => {
     const tool = (exec as GuardToolExecution).name ?? (exec as GuardToolExecution).tool ?? ''
     const rawArgs = (exec as any)?.args ?? (exec as any)?.arguments
@@ -105,7 +106,30 @@ export function createGuardHandler(store: ApprovalStore, policy: PermissionPolic
       cwdContainment,
     })
     if (sandboxRes.blocked) {
-      throw new Error(`Guard: ${sandboxRes.reason}`)
+      const scope: 'git-protection' | 'publish' = sandboxRes.reason?.includes('publish') ? 'publish' : 'git-protection'
+      const cmdText = redact(combinedForCheck.slice(0, 300))
+      const hash = ticketHash(scope, cmdText)
+      const approved = await pending.findApprovedByHash(scope, hash)
+      if (approved) {
+        await pending.consume(approved.id) // exactly one retry passes (consume is mutex-serialized)
+      }
+      if (!approved) {
+        try {
+          const req = await pending.record({
+            scope,
+            tool,
+            command: cmdText,
+            reason: sandboxRes.reason ?? 'blocked',
+            sessionId: (exec as any)?.agent?.session?.id ?? undefined,
+            cwd,
+          })
+          throw new Error(`Guard: ${sandboxRes.reason} — request ${req.id}; present this exact operation in the conversation, then approve via the approve tool after the human consents`)
+        } catch (e) {
+          if (e instanceof Error && e.message.startsWith('Guard:')) throw e
+          throw new Error(`Guard: ${sandboxRes.reason}`)
+        }
+      }
+      // approved: fall through to the shared tail (policy check, secret redaction, next())
     }
 
     if (!policy.isAllowed(tool, rawArgs)) {
@@ -130,8 +154,9 @@ export default {
   inject: ['tools'] as const,
   apply(ctx: Context) {
     const store = new ApprovalStore()
+    const pending = new PendingStore()
     const policy = new PermissionPolicy({ deny: ['danger-tool'] })
-    const handler = createGuardHandler(store, policy)
+    const handler = createGuardHandler(store, policy, pending)
     ctx.effect(() => ctx.on('tools/pre-execute', handler as any))
     // register on-demand full-scan tool (Task 4) alongside guard handler
     applyFullScan(ctx, {})
