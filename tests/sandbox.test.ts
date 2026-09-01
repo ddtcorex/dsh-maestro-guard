@@ -167,7 +167,7 @@ describe('guard handler git-protection', () => {
     const store = new ApprovalStore(dir)
     const pending = new PendingStore(dir)
     const policy = new PermissionPolicy({})
-    const handler = createGuardHandler(store, policy, pending)
+    const handler = createGuardHandler(store, policy, pending, async () => ({}))
     const payload: any = { name: 'exec', arguments: { command: 'git push origin master' } }
     await expect(handler(payload, async () => ({ kind: 'allow' as const }))).rejects.toThrow(/master.*APPROVED|git.*blocked/i)
   })

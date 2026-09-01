@@ -4,7 +4,7 @@ import { ApprovalStore } from './approval-store.js'
 import { PermissionPolicy } from './permission-policy.js'
 import { PendingStore, ticketHash } from './pending.js'
 import { containsSecret, redact } from './secret-redactor.js'
-import { checkSandbox, isBlockedGitCommand } from './sandbox.js'
+import { checkSandbox, extractCommandText, isBlockedCommand, isBlockedGitCommand, resolveCurrentBranch } from './sandbox.js'
 import { apply as applyFullScan } from './full-scan-tool.js'
 import { applyApproveTools } from './approve-tool.js'
 import type { GuardToolExecution, GuardPreToolDecision } from './augment.js'
@@ -58,19 +58,32 @@ async function readGuardConfig(): Promise<Record<string, unknown>> {
   return {}
 }
 
-export function createGuardHandler(store: ApprovalStore, policy: PermissionPolicy, pending: PendingStore) {
+export function createGuardHandler(
+  store: ApprovalStore,
+  policy: PermissionPolicy,
+  pending: PendingStore,
+  readConfig: () => Promise<Record<string, unknown>> = readGuardConfig,
+) {
   return async (exec: GuardToolExecution, next: () => Promise<GuardPreToolDecision>): Promise<GuardPreToolDecision> => {
     const tool = (exec as GuardToolExecution).name ?? (exec as GuardToolExecution).tool ?? ''
     const rawArgs = (exec as any)?.args ?? (exec as any)?.arguments
 
     // Sandbox hard gate: credential paths, ~/.cloudflared, NPM_TOKEN, git-protection, publish, cwd (via checkSandbox)
     const cwd = getSessionCwd(exec)
-    const currentBranch = cwd ? getCurrentBranch(cwd) : undefined
+    // Branch detection follows the repo the command actually targets (cd / git -C),
+    // not the session cwd — a session whose cwd repo sits on master must not block
+    // feature-branch pushes inside sub-repos (fix/guard-protection-precision).
+    const commandText = extractCommandText(rawArgs)
+    // Resolve the current branch lazily, only when the executed command could
+    // plausibly be a git/gh operation — otherwise every tool call (reads,
+    // writes, memory, unrelated bash) would spawn `git branch --show-current`
+    // for nothing.
+    const branchRelevant = commandText != null && /\b(git|gh)\b/i.test(commandText)
+    const currentBranch = branchRelevant ? resolveCurrentBranch(commandText, cwd, getCurrentBranch) : undefined
     const asTextForSandbox = rawArgs != null ? JSON.stringify(rawArgs) : ''
     const combinedForCheck = `${tool} ${asTextForSandbox}`
-    const combinedForPublish = combinedForCheck
     // Read guard config at runtime (injected lists) — fallback to defaults when empty
-    const guardCfg = await readGuardConfig().catch(() => ({} as Record<string, unknown>))
+    const guardCfg = await readConfig().catch(() => ({} as Record<string, unknown>))
     const credentialPaths = Array.isArray((guardCfg as any).credentialPaths) ? (guardCfg as any).credentialPaths as string[] : undefined
     const gitProtection = (guardCfg as any).gitProtection && typeof (guardCfg as any).gitProtection === 'object' ? (guardCfg as any).gitProtection as { enabled: boolean; branches: string[] } : undefined
     const publishBlocked = typeof (guardCfg as any).publishBlocked === 'boolean' ? (guardCfg as any).publishBlocked as boolean : undefined
@@ -80,7 +93,7 @@ export function createGuardHandler(store: ApprovalStore, policy: PermissionPolic
     const gitEnabled = gitProtection?.enabled ?? true
     const branches = gitProtection?.branches ?? ['master', 'main']
 
-    const isPublish = publishBlockedEffective ? /\b(pnpm|npm)\s+publish\b/.test(combinedForPublish) : false
+    const isPublish = publishBlockedEffective && commandText ? isBlockedCommand(commandText) : false
     let approvedForPublish = false
     if (isPublish) {
       approvedForPublish =
@@ -89,7 +102,7 @@ export function createGuardHandler(store: ApprovalStore, policy: PermissionPolic
         (await store.isApproved('pnpm publish')) ||
         (await store.isApproved(tool))
     }
-    const isGitProtected = gitEnabled ? isBlockedGitCommand(combinedForCheck, currentBranch, branches) : false
+    const isGitProtected = gitEnabled && commandText ? isBlockedGitCommand(commandText, currentBranch, branches) : false
     let approvedForGit = false
     if (isGitProtected) {
       approvedForGit =
@@ -108,9 +121,14 @@ export function createGuardHandler(store: ApprovalStore, policy: PermissionPolic
     })
     if (sandboxRes.blocked) {
       const scope: 'git-protection' | 'publish' = sandboxRes.reason?.includes('publish') ? 'publish' : 'git-protection'
-      const cmdText = redact(combinedForCheck.slice(0, 300))
+      const sessionId = (exec as any)?.agent?.session?.id ?? undefined
+      // Hash over the executed command when available, not the full (tool + args)
+      // serialization — cosmetic arg fields (description, timeoutMs) must not
+      // mint a fresh ticket for a re-run of the same command (fix/guard-protection-precision).
+      const canonical = commandText ?? combinedForCheck
+      const cmdText = redact(canonical.slice(0, 300))
       const hash = ticketHash(scope, cmdText)
-      const approved = await pending.findApprovedByHash(scope, hash)
+      const approved = await pending.findApprovedByHash(scope, hash, sessionId)
       if (approved) {
         await pending.consume(approved.id) // exactly one retry passes (consume is mutex-serialized)
       }
@@ -121,7 +139,7 @@ export function createGuardHandler(store: ApprovalStore, policy: PermissionPolic
             tool,
             command: cmdText,
             reason: sandboxRes.reason ?? 'blocked',
-            sessionId: (exec as any)?.agent?.session?.id ?? undefined,
+            sessionId,
             cwd,
           })
           throw new Error(`Guard: ${sandboxRes.reason} — request ${req.id}; present this exact operation in the conversation, then approve via the approve tool after the human consents`)
