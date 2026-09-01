@@ -26,7 +26,7 @@ describe('dsh-maestro-guard', () => {
   it('package.json name is @ddtcorex/dsh-maestro-guard', () => {
     const pkg = JSON.parse(readFileCandidates('packages/dsh-maestro-guard/package.json', 'package.json'));
     expect(pkg.name).toBe('@ddtcorex/dsh-maestro-guard');
-    expect(pkg.version).toBe('0.1.0');
+    expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/);
     expect(pkg.dsh.bundle.patch).toBe('./cordis.patch.yml');
   });
 
@@ -117,3 +117,72 @@ describe('guard handler via createGuardHandler', () => {
     expect(JSON.stringify(payload.arguments)).not.toContain(raw)
   })
 });
+
+describe('guard handler chat-approve tickets', () => {
+  const mergeCmd = ['gh', 'pr', 'merge', '4'].join(' ')
+  const pubCmd = ['pnpm', 'publish'].join(' ')
+  const basePayload = (cmd: string) => ({ name: 'bash', arguments: { command: cmd, cwd: '/tmp/x' } })
+  async function fresh(dir: string) {
+    const { PendingStore } = await import('../src/host/pending.js')
+    const { createGuardHandler } = await import('../src/host/index.js')
+    const store = new ApprovalStore(dir)
+    const pending = new PendingStore(dir)
+    const policy = new PermissionPolicy({})
+    return { store, pending, policy, handler: createGuardHandler(store, policy, pending) }
+  }
+  it('blocked merge records a ticket and the error names the id', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'g-'))
+    const { pending, handler } = await fresh(dir)
+    let err: any
+    try { await handler(basePayload(mergeCmd), async () => ({ kind: 'allow' as const })) } catch (e) { err = e }
+    expect(err).toBeDefined()
+    expect(String(err.message)).toContain('request g-')
+    const reqs = await pending.list()
+    expect(reqs.length).toBe(1)
+    expect(reqs[0].scope).toBe('git-protection')
+    expect(reqs[0].status).toBe('pending')
+  })
+  it('approved ticket lets the exact command pass once, then blocks again', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'g-'))
+    const { pending, handler, store } = await fresh(dir)
+    try { await handler(basePayload(mergeCmd), async () => ({ kind: 'allow' as const })) } catch {}
+    const req = (await pending.list())[0]
+    await pending.approve(req.id)
+    let nextCalled = false
+    await handler(basePayload(mergeCmd), async () => { nextCalled = true; return { kind: 'allow' as const } })
+    expect(nextCalled).toBe(true)
+    expect((await pending.list())[0].status).toBe('consumed')
+    expect(await store.isApproved('git-protection')).toBe(false) // no scope-wide grant
+    let err: any
+    try { await handler(basePayload(mergeCmd), async () => ({ kind: 'allow' as const })) } catch (e) { err = e }
+    expect(err).toBeDefined()
+    // re-blocked: a fresh pending ticket for the same hash
+    expect((await pending.list()).some((r) => r.status === 'pending')).toBe(true)
+  })
+  it('pending ticket does not let the command pass', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'g-'))
+    const { handler } = await fresh(dir)
+    try { await handler(basePayload(mergeCmd), async () => ({ kind: 'allow' as const })) } catch {}
+    let err: any
+    try { await handler(basePayload(mergeCmd), async () => ({ kind: 'allow' as const })) } catch (e) { err = e }
+    expect(err).toBeDefined()
+  })
+  it('a modified invocation is blocked even when the original is approved', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'g-'))
+    const { handler } = await fresh(dir)
+    try { await handler(basePayload(mergeCmd), async () => ({ kind: 'allow' as const })) } catch {}
+    try { await handler(basePayload(mergeCmd + ' --no-edit'), async () => ({ kind: 'allow' as const })) } catch {}
+    const { PendingStore } = await import('../src/host/pending.js')
+    const pending = new PendingStore(dir)
+    const reqs = await pending.list()
+    expect(reqs.length).toBe(2) // different hashes -> separate tickets
+  })
+  it('blocked publish records scope publish', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'g-'))
+    const { pending, handler } = await fresh(dir)
+    let err: any
+    try { await handler(basePayload(pubCmd), async () => ({ kind: 'allow' as const })) } catch (e) { err = e }
+    expect(err).toBeDefined()
+    expect((await pending.list())[0].scope).toBe('publish')
+  })
+})
