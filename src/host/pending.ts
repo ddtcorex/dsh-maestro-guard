@@ -41,7 +41,11 @@ export function ticketHash(scope: string, command: string): string {
 }
 
 function isExpired(req: PendingRequest, nowMs: number): boolean {
-  return !!req.expiresAt && nowMs > Date.parse(req.expiresAt)
+  // Legacy tickets recorded before the TTL existed carry no expiresAt; treat
+  // them as expiring at requestedAt + APPROVAL_TTL_MS so pre-TTL pending/
+  // approved tickets are pruned too instead of lingering forever.
+  if (req.expiresAt) return nowMs > Date.parse(req.expiresAt)
+  try { return nowMs > Date.parse(req.requestedAt) + APPROVAL_TTL_MS } catch { return false }
 }
 
 export class PendingStore {
