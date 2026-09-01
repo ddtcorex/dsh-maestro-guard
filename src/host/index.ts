@@ -4,7 +4,7 @@ import { ApprovalStore } from './approval-store.js'
 import { PermissionPolicy } from './permission-policy.js'
 import { PendingStore, ticketHash } from './pending.js'
 import { containsSecret, redact } from './secret-redactor.js'
-import { checkSandbox, isBlockedGitCommand, resolveCurrentBranch } from './sandbox.js'
+import { checkSandbox, extractCommandText, isBlockedCommand, isBlockedGitCommand, resolveCurrentBranch } from './sandbox.js'
 import { apply as applyFullScan } from './full-scan-tool.js'
 import { applyApproveTools } from './approve-tool.js'
 import type { GuardToolExecution, GuardPreToolDecision } from './augment.js'
@@ -73,11 +73,10 @@ export function createGuardHandler(
     // Branch detection follows the repo the command actually targets (cd / git -C),
     // not the session cwd — a session whose cwd repo sits on master must not block
     // feature-branch pushes inside sub-repos (fix/guard-protection-precision).
-    const commandText = typeof rawArgs === 'string' ? rawArgs : typeof (rawArgs as any)?.command === 'string' ? (rawArgs as any).command as string : undefined
+    const commandText = extractCommandText(rawArgs)
     const currentBranch = resolveCurrentBranch(commandText, cwd, getCurrentBranch)
     const asTextForSandbox = rawArgs != null ? JSON.stringify(rawArgs) : ''
     const combinedForCheck = `${tool} ${asTextForSandbox}`
-    const combinedForPublish = combinedForCheck
     // Read guard config at runtime (injected lists) — fallback to defaults when empty
     const guardCfg = await readConfig().catch(() => ({} as Record<string, unknown>))
     const credentialPaths = Array.isArray((guardCfg as any).credentialPaths) ? (guardCfg as any).credentialPaths as string[] : undefined
@@ -89,7 +88,7 @@ export function createGuardHandler(
     const gitEnabled = gitProtection?.enabled ?? true
     const branches = gitProtection?.branches ?? ['master', 'main']
 
-    const isPublish = publishBlockedEffective ? /\b(pnpm|npm)\s+publish\b/.test(combinedForPublish) : false
+    const isPublish = publishBlockedEffective && commandText ? isBlockedCommand(commandText) : false
     let approvedForPublish = false
     if (isPublish) {
       approvedForPublish =
@@ -98,7 +97,7 @@ export function createGuardHandler(
         (await store.isApproved('pnpm publish')) ||
         (await store.isApproved(tool))
     }
-    const isGitProtected = gitEnabled ? isBlockedGitCommand(combinedForCheck, currentBranch, branches) : false
+    const isGitProtected = gitEnabled && commandText ? isBlockedGitCommand(commandText, currentBranch, branches) : false
     let approvedForGit = false
     if (isGitProtected) {
       approvedForGit =

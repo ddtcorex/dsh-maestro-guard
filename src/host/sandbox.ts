@@ -101,36 +101,65 @@ export function resolveCurrentBranch(
   return branchOf(dir)
 }
 
-export function isBlockedCommand(cmd: string): boolean {
-  if (!cmd || typeof cmd !== 'string') return false
-  // detect "pnpm publish" or "npm publish" as whole word sequence
-  return /\b(pnpm|npm)\s+publish\b/.test(cmd)
+/**
+ * The executed command surface of a tool call. Shell-style tools carry their
+ * script in `args.command` (bash/exec/shell/govard_shell); bare string args are
+ * the command itself. Tools with no command field (read/write/memory/...) have
+ * no execution surface, so protected-op detection must not apply to their
+ * content — that was the source of the analysis-tool false positives.
+ */
+export function extractCommandText(args: unknown): string | undefined {
+  if (args == null) return undefined
+  if (typeof args === 'string') return args
+  if (typeof args === 'object' && typeof (args as Record<string, unknown>).command === 'string') {
+    return (args as Record<string, unknown>).command as string
+  }
+  return undefined
 }
 
+/** Collapse quoted spans — text inside quotes is data (echo/printf/script bodies), not argv. */
+function stripQuoted(cmd: string): string {
+  return cmd.replace(/"[^"]*"/g, ' ').replace(/'[^']*'/g, ' ')
+}
+
+export function isBlockedCommand(cmd: string): boolean {
+  if (!cmd || typeof cmd !== 'string') return false
+  // package-manager publish verbs as a whole-word sequence
+  return /\b(pnpm|npm)\s+publish\b/.test(stripQuoted(cmd))
+}
+
+/**
+ * True when the command executes a protected git operation. Detection is
+ * per-command-segment (split on && / ; / | / newline) so a `gh pr create
+ * --base master` mention after a feature push — or quoted text anywhere — does
+ * not turn a safe push into a blocked one. Hard rules (gh pr merge, gh release,
+ * protection deletion, protected branch words in the push segment, being
+ * checked out on a protected branch) keep their unconditional coverage.
+ */
 export function isBlockedGitCommand(cmd: string, currentBranch?: string, branches?: string[]): boolean {
   if (!cmd || typeof cmd !== 'string') return false
-  const lower = cmd.toLowerCase()
-  // gh pr merge always protected
-  if (/\bgh\s+pr\s+merge\b/.test(lower)) return true
-  if (/\bgh\s+release\s+(create|publish)\b/.test(lower)) return true
   const effectiveBranches = branches && branches.length > 0 ? branches : ['master', 'main']
   const lowerBranches = effectiveBranches.map((b) => b.toLowerCase())
-  // gh api delete protection with dynamic branches
-  for (const b of lowerBranches) {
-    const esc = b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const re = new RegExp(`gh\\s+api\\b.*delete.*\\/branches\\/${esc}\\/protection`)
-    if (re.test(lower)) return true
-  }
-  // git push with explicit protected branch target or when current branch is protected
-  if (/\bgit\s+push\b/.test(lower)) {
+  const escBranch = (b: string) => b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const segments = cmd.split(/\s*(?:&&|\|\||;|\||\r?\n)+\s*/)
+  for (const seg of segments) {
+    const lower = stripQuoted(seg).toLowerCase()
+    // hard rules are unconditional per segment
+    if (/\bgh\s+pr\s+merge\b/.test(lower)) return true
+    if (/\bgh\s+release\s+(create|publish)\b/.test(lower)) return true
     for (const b of lowerBranches) {
-      const esc = b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      const branchWordRe = new RegExp(`\\b${esc}\\b`)
-      if (branchWordRe.test(lower)) return true
+      const re = new RegExp(`gh\\s+api\\b.*delete.*\\/branches\\/${escBranch(b)}\\/protection`)
+      if (re.test(lower)) return true
     }
-    if (currentBranch) {
-      const curLower = currentBranch.toLowerCase()
-      if (lowerBranches.includes(curLower)) return true
+    // git push: protected branch word in THIS segment, or checked out on one
+    if (/\bgit\s+push\b/.test(lower)) {
+      for (const b of lowerBranches) {
+        if (new RegExp(`\\b${escBranch(b)}\\b`).test(lower)) return true
+      }
+      if (currentBranch) {
+        const curLower = currentBranch.toLowerCase()
+        if (lowerBranches.includes(curLower)) return true
+      }
     }
   }
   // git tag push that includes protected branch (rare) — already covered by push regex
@@ -200,6 +229,10 @@ export function checkSandbox(
   // Serialize args for generic substring checks
   const asText = args != null ? (typeof args === 'string' ? args : JSON.stringify(args)) : ''
   const combined = `${tool ?? ''} ${asText}`
+  // Protected-op detection (git/publish) runs on the executed command surface
+  // only — non-shell tools (write/read/memory/...) have no command and must not
+  // be flagged for text that merely mentions a protected phrase.
+  const execText = extractCommandText(args)
 
   // 1) Block credential paths anywhere in tool+args (always, with injected list)
   if (isBlockedPath(tool, credentialPaths) || isBlockedPath(asText, credentialPaths) || isBlockedPath(combined, credentialPaths)) {
@@ -209,12 +242,12 @@ export function checkSandbox(
   // 2) Block git push to protected branches without APPROVED (branch-aware, toggle-aware)
   const gitEnabled = gitProtection?.enabled ?? true
   const branches = gitProtection?.branches ?? ['master', 'main']
-  if (gitEnabled && isBlockedGitCommand(combined, currentBranch, branches) && !approved) {
-    return { blocked: true, reason: 'git push to master/main blocked without APPROVED: ' + combined.slice(0, 300) }
+  if (gitEnabled && execText && isBlockedGitCommand(execText, currentBranch, branches) && !approved) {
+    return { blocked: true, reason: 'git push to master/main blocked without APPROVED: ' + execText.slice(0, 300) }
   }
 
   // 3) Block publish without APPROVED (toggle-aware)
-  if (publishBlocked && isBlockedCommand(combined) && !approved) {
+  if (publishBlocked && execText && isBlockedCommand(execText) && !approved) {
     return { blocked: true, reason: 'publish blocked without APPROVED: pnpm publish requires approval' }
   }
 
