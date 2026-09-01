@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { mkdtemp, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { PendingStore, pendingPath, MAX_PENDING, ticketHash } from '../src/host/pending.js';
 
 const base = (scope: 'git-protection' | 'publish') => ({
@@ -87,5 +87,43 @@ describe('PendingStore tickets', () => {
     const list = await s.list();
     expect(list.length).toBeLessThanOrEqual(MAX_PENDING);
     expect(list.some((r) => r.command === 'overflow')).toBe(true);
+  });
+});
+
+describe('PendingStore legacy tickets (no expiresAt, pre-TTL)', () => {
+  const seed = async (dir: string, status: 'pending' | 'approved') => {
+    const { writeFile, mkdir } = await import('node:fs/promises');
+    await mkdir(dirname(pendingPath(dir)), { recursive: true });
+    await writeFile(
+      pendingPath(dir),
+      JSON.stringify({
+        requests: [
+          {
+            id: 'g-legacy01', scope: 'git-protection', tool: 'bash', hash: 'aaaa1111bbbb',
+            command: 'legacy protected op', reason: 'blocked',
+            requestedAt: '2026-09-01T01:00:00.000Z',
+            status,
+          },
+        ],
+      }),
+    );
+  };
+
+  it('prunes a legacy pending ticket once requestedAt + TTL has passed', async () => {
+    const { APPROVAL_TTL_MS } = await import('../src/host/pending.js');
+    const dir = await mkdtemp(join(tmpdir(), 'p-leg-'));
+    await seed(dir, 'pending');
+    const t0 = Date.parse('2026-09-01T01:00:00.000Z');
+    const s = new PendingStore(dir, () => t0 + APPROVAL_TTL_MS + 1);
+    expect((await s.list())[0].status).toBe('expired');
+  });
+
+  it('refuses a legacy APPROVED ticket once requestedAt + TTL has passed', async () => {
+    const { APPROVAL_TTL_MS } = await import('../src/host/pending.js');
+    const dir = await mkdtemp(join(tmpdir(), 'p-leg2-'));
+    await seed(dir, 'approved');
+    const t0 = Date.parse('2026-09-01T01:00:00.000Z');
+    const s = new PendingStore(dir, () => t0 + APPROVAL_TTL_MS + 1);
+    expect(await s.findApprovedByHash('git-protection', 'aaaa1111bbbb')).toBeUndefined();
   });
 });
