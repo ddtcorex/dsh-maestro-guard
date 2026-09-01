@@ -117,9 +117,14 @@ export function createGuardHandler(
     })
     if (sandboxRes.blocked) {
       const scope: 'git-protection' | 'publish' = sandboxRes.reason?.includes('publish') ? 'publish' : 'git-protection'
-      const cmdText = redact(combinedForCheck.slice(0, 300))
+      const sessionId = (exec as any)?.agent?.session?.id ?? undefined
+      // Hash over the executed command when available, not the full (tool + args)
+      // serialization — cosmetic arg fields (description, timeoutMs) must not
+      // mint a fresh ticket for a re-run of the same command (fix/guard-protection-precision).
+      const canonical = commandText ?? combinedForCheck
+      const cmdText = redact(canonical.slice(0, 300))
       const hash = ticketHash(scope, cmdText)
-      const approved = await pending.findApprovedByHash(scope, hash)
+      const approved = await pending.findApprovedByHash(scope, hash, sessionId)
       if (approved) {
         await pending.consume(approved.id) // exactly one retry passes (consume is mutex-serialized)
       }
@@ -130,7 +135,7 @@ export function createGuardHandler(
             tool,
             command: cmdText,
             reason: sandboxRes.reason ?? 'blocked',
-            sessionId: (exec as any)?.agent?.session?.id ?? undefined,
+            sessionId,
             cwd,
           })
           throw new Error(`Guard: ${sandboxRes.reason} — request ${req.id}; present this exact operation in the conversation, then approve via the approve tool after the human consents`)
