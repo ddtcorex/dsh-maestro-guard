@@ -17,7 +17,7 @@ Part of the Maestro Harness suite. No client bundle — everything runs in the N
 - `src/host/secret-redactor.ts` — redacts known secret families before a call is logged/persisted.
 - `src/host/permission-policy.ts` — policy check for whether a tool call is allowed.
 - `src/host/augment.d.ts` — local structural types for the DSH tool-execution contract (do NOT import from `deepseek-harness`).
-- `tests/*.test.ts` — vitest suites (96 tests): guard, approval-store, secret-redactor, permission, sandbox (branch-scope), approval lifecycle (TTL/session), command-surface, unknown working-dir.
+- `tests/*.test.ts` — vitest suites (101 tests): guard, approval-store, secret-redactor, permission, sandbox (branch-scope), approval lifecycle (TTL/session), command-surface, unknown working-dir, tag protection.
 
 ## Development
 
