@@ -150,9 +150,13 @@ export function isBlockedGitCommand(cmd: string, currentBranch?: string, branche
   const effectiveBranches = branches && branches.length > 0 ? branches : ['master', 'main']
   const lowerBranches = effectiveBranches.map((b) => b.toLowerCase())
   const escBranch = (b: string) => b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const segments = cmd.split(/\s*(?:&&|\|\||;|\||\r?\n)+\s*/)
+  // Strip quoted spans on the FULL text BEFORE segmenting: a quoted block (an
+  // instruction prompt, a multiline -e body) legitimately spans &&/;|/newline
+  // separators, and segment-then-strip would fragment it, exposing the words.
+  const stripped = stripQuoted(cmd)
+  const segments = stripped.split(/\s*(?:&&|\|\||;|\||\r?\n)+\s*/)
   for (const seg of segments) {
-    const lower = stripQuoted(seg).toLowerCase()
+    const lower = seg.toLowerCase()
     // hard rules are unconditional per segment
     if (/\bgh\s+pr\s+merge\b/.test(lower)) return true
     if (/\bgh\s+release\s+(create|publish)\b/.test(lower)) return true
