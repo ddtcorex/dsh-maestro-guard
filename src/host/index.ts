@@ -74,7 +74,12 @@ export function createGuardHandler(
     // not the session cwd — a session whose cwd repo sits on master must not block
     // feature-branch pushes inside sub-repos (fix/guard-protection-precision).
     const commandText = extractCommandText(rawArgs)
-    const currentBranch = resolveCurrentBranch(commandText, cwd, getCurrentBranch)
+    // Resolve the current branch lazily, only when the executed command could
+    // plausibly be a git/gh operation — otherwise every tool call (reads,
+    // writes, memory, unrelated bash) would spawn `git branch --show-current`
+    // for nothing.
+    const branchRelevant = commandText != null && /\b(git|gh)\b/i.test(commandText)
+    const currentBranch = branchRelevant ? resolveCurrentBranch(commandText, cwd, getCurrentBranch) : undefined
     const asTextForSandbox = rawArgs != null ? JSON.stringify(rawArgs) : ''
     const combinedForCheck = `${tool} ${asTextForSandbox}`
     // Read guard config at runtime (injected lists) — fallback to defaults when empty

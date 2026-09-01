@@ -73,10 +73,19 @@ export function isBlockedPath(input: string, credentialPaths?: string[]): boolea
  */
 export function getCommandWorkingDir(command: string | undefined, cwd: string | undefined): string | undefined {
   if (!command || !cwd) return cwd ?? undefined
+  const hasCdVerb = /\bcd\b/.test(command) || /\bgit\s+-C\b/.test(command)
   const cd = /\bcd\s+([^\s;&|"'`${}]+)(?:\s*(?:[;&|]|$))/.exec(command)
   const c = /\bgit\s+-C\s+([^\s;&|"'`${}]+)/.exec(command)
   const dir = cd?.[1] ?? c?.[1]
-  if (!dir) return cwd
+  if (!dir) {
+    // A cd/-C verb is present but its target cannot be parsed (quoted, $VAR,
+    // wildcard, bare `cd`): do NOT assume the session cwd — that reintroduces
+    // the false positive when the session cwd repo sits on a protected branch.
+    // Unknown target means no protected-branch assumption (segment word checks
+    // still apply); commands with no cd verb keep the session-cwd semantics.
+    if (hasCdVerb) return undefined
+    return cwd
+  }
   if (dir === '~') return homedir()
   if (dir.startsWith('~/')) return join(homedir(), dir.slice(2))
   return resolve(cwd, dir)
