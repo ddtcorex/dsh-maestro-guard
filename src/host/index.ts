@@ -6,6 +6,7 @@ import { PendingStore, ticketHash } from './pending.js'
 import { containsSecret, redact } from './secret-redactor.js'
 import { checkSandbox, isBlockedGitCommand } from './sandbox.js'
 import { apply as applyFullScan } from './full-scan-tool.js'
+import { applyApproveTools } from './approve-tool.js'
 import type { GuardToolExecution, GuardPreToolDecision } from './augment.js'
 
 function getCurrentBranch(cwd?: string): string | undefined {
@@ -160,5 +161,6 @@ export default {
     ctx.effect(() => ctx.on('tools/pre-execute', handler as any))
     // register on-demand full-scan tool (Task 4) alongside guard handler
     applyFullScan(ctx, {})
+    applyApproveTools(ctx, { pending })
   }
 }
