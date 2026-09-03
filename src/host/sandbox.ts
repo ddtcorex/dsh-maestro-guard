@@ -1,4 +1,4 @@
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join, resolve, normalize } from 'node:path'
 
 function expandHome(p: string): string {
@@ -208,6 +208,22 @@ export function isOutsideCwd(target: string, cwd: string): boolean {
   return !resolvedTarget.startsWith(resolvedCwd + '/')
 }
 
+/**
+ * True for reads of the DSH runtime spill dir (`$TMPDIR/dsh-spill-*`).
+ * The spill policy persists oversized tool results there and instructs the
+ * model to read them back via read tools — blocking those reads breaks the
+ * foundation's own retrieval flow (tickets g-dd0d1679/g-716cd436/g-d77f0144).
+ * Read-only: only read tools consult this; writes stay cwd-contained.
+ * The random dir suffix makes cross-session spills unguessable, and the
+ * runtime only ever discloses an agent's own spill paths to it.
+ */
+export function isRuntimeSpillPath(target: string): boolean {
+  if (!target || typeof target !== 'string') return false
+  const resolved = resolve(expandHome(target.trim()))
+  const prefix = join(tmpdir(), 'dsh-spill-')
+  return resolved.startsWith(prefix)
+}
+
 export interface SandboxCheckResult {
   blocked: boolean
   reason?: string
@@ -275,6 +291,7 @@ export function checkSandbox(
 
   // 4) Block maestro file tools outside cwd (toggle-aware)
   const fileTools = new Set(['maestro_read_file', 'maestro_write_file', 'fs_read', 'fs_write', 'read_file', 'write_file'])
+  const readTools = new Set(['maestro_read_file', 'fs_read', 'read_file'])
   if (cwdContainment && cwd && fileTools.has(tool)) {
     let pathVal: string | undefined
     if (typeof args === 'object' && args !== null) {
@@ -295,7 +312,7 @@ export function checkSandbox(
       if (isBlockedPath(pathVal, credentialPaths)) {
         return { blocked: true, reason: `credential path blocked: ${pathVal}` }
       }
-      if (isOutsideCwd(pathVal, cwd)) {
+      if (isOutsideCwd(pathVal, cwd) && !(readTools.has(tool) && isRuntimeSpillPath(pathVal))) {
         return { blocked: true, reason: `path outside cwd: ${pathVal} not in ${cwd}` }
       }
     }

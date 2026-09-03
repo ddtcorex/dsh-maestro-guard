@@ -89,6 +89,20 @@ describe('sandbox: cwd containment for maestro file tools', () => {
     expect(checkSandbox('maestro_write_file', { path: outside }, { cwd }).blocked).toBe(true)
     expect(checkSandbox('maestro_write_file', { path: '/tmp/workspace/my-project/out.txt' }, { cwd }).blocked).toBe(false)
   })
+  it('allows reads of the DSH runtime spill dir (foundation retrieval hint)', async () => {
+    const { checkSandbox } = await import('../src/host/sandbox.js')
+    // Reproduces tickets g-dd0d1679/g-716cd436/g-d77f0144: the spill policy
+    // tells the model to read /tmp/dsh-spill-* via read tools, so blocking
+    // those reads breaks the foundation's own retrieval flow.
+    const cwd = join(tmpdir(), 'maestro-mr-1137-3760-9b22ea39')
+    const spill = join(tmpdir(), 'dsh-spill-MbE4xz', 'session-45ea5295386a', 'de5c367ef79c-maestro_read_file.txt')
+    expect(checkSandbox('maestro_read_file', { path: spill }, { cwd }).blocked).toBe(false)
+    expect(checkSandbox('fs_read', { path: spill }, { cwd }).blocked).toBe(false)
+    // Writes to the spill dir stay blocked — the runtime owns those files.
+    expect(checkSandbox('maestro_write_file', { path: spill }, { cwd }).blocked).toBe(true)
+    // Non-spill outside-cwd reads stay blocked.
+    expect(checkSandbox('maestro_read_file', { path: '/etc/passwd' }, { cwd }).blocked).toBe(true)
+  })
   it('guard handler integration: blocks credentials via handler', async () => {
     const { createGuardHandler } = await import('../src/host/index.js')
     const { ApprovalStore } = await import('../src/host/approval-store.js')
