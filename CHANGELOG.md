@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-09-04
+
+### Fixed
+
+- Resolve relative file paths against the session cwd instead of the
+  process cwd. (#19)
+- Allow read-only access to the DSH runtime session-spill directory so
+  reviewers can read spilled diffs. (#20)
+
 ## [0.2.2] - 2026-09-01
 
 ### Fixed
