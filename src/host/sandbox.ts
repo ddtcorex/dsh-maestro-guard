@@ -192,14 +192,17 @@ export function isPublishBlocked(cmd: string, approved: boolean): boolean {
 
 /**
  * True if target path is outside cwd (strict containment).
- * Uses resolve for absolute comparison; expanded ~/ handled.
+ * Relative targets resolve against cwd (the calling agent's session cwd),
+ * matching how maestro file tools resolve them — resolving against the host
+ * process.cwd() instead false-positives every worktree-relative read
+ * (review sessions read /tmp worktrees while the host runs elsewhere).
  */
 export function isOutsideCwd(target: string, cwd: string): boolean {
   if (!target || !cwd) return false
   const expTarget = expandHome(target)
   const expCwd = expandHome(cwd)
-  const resolvedTarget = resolve(expTarget)
   const resolvedCwd = resolve(expCwd)
+  const resolvedTarget = resolve(resolvedCwd, expTarget)
   if (resolvedTarget === resolvedCwd) return false
   // Ensure cwd prefix with separator to avoid /tmp/proj matching /tmp/proj2
   return !resolvedTarget.startsWith(resolvedCwd + '/')

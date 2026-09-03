@@ -71,6 +71,17 @@ describe('sandbox: cwd containment for maestro file tools', () => {
     const allowed = checkSandbox('maestro_read_file', { path: join(cwd, 'README.md') }, { cwd })
     expect(allowed.blocked).toBe(false)
   })
+  it('allows relative paths inside cwd (review worktree)', async () => {
+    const { isOutsideCwd, checkSandbox } = await import('../src/host/sandbox.js')
+    // Reproduces tickets g-368be8ee/g-5d300451: reviewer session cwd is a
+    // /tmp worktree and reads use worktree-relative paths.
+    const cwd = join(tmpdir(), 'maestro-mr-1137-3786-e118b845')
+    expect(isOutsideCwd('app/design/frontend/Acme/shop/Magento_CatalogSearch/templates/result.phtml', cwd)).toBe(false)
+    expect(isOutsideCwd('app/code/Acme/Customer/Service/CustomerService.php', cwd)).toBe(false)
+    // Escapes via .. must stay blocked even in relative form.
+    expect(isOutsideCwd('../escape.php', cwd)).toBe(true)
+    expect(checkSandbox('maestro_read_file', { path: 'app/code/Acme/Elist/Controller/Submit/Create.php' }, { cwd }).blocked).toBe(false)
+  })
   it('blocks maestro_write_file outside cwd', async () => {
     const { checkSandbox } = await import('../src/host/sandbox.js')
     const cwd = '/tmp/workspace/my-project'
