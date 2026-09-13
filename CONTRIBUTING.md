@@ -16,7 +16,7 @@ Thank you for contributing to **dsh-maestro-guard** (`@ddtcorex/dsh-maestro-guar
    ```bash
    pnpm build        # tsc -p tsconfig.json -> lib/index.js (flat)
    pnpm verify      # tsc --noEmit — typecheck without emitting
-   pnpm test        # vitest run (27 tests)
+   pnpm test        # vitest run
    ```
 
 4. Open the project in your editor. Host logic lives in `src/host/`, tests in `tests/`, `lib/` is build output (gitignored) — never hand-edit it; run `pnpm build` after a source change. Channel is `/dsh-maestro-guard` (see `cordis.patch.yml`); DSH types are local structural declarations in `src/host/augment.d.ts` — do not import from `deepseek-harness`.
