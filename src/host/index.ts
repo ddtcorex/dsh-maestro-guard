@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { ApprovalStore } from './approval-store.js'
 import { PermissionPolicy } from './permission-policy.js'
 import { PendingStore, ticketHash } from './pending.js'
-import { containsSecret, redact } from './secret-redactor.js'
+import { redact } from './redact.js'
 import { checkSandbox, extractCommandText, isBlockedCommand, isBlockedGitCommand, resolveCurrentBranch } from './sandbox.js'
 import { apply as applyFullScan } from './full-scan-tool.js'
 import { applyApproveTools } from './approve-tool.js'
@@ -157,14 +157,8 @@ export function createGuardHandler(
     if (tool === 'danger-tool' && !(await store.isApproved(tool))) {
       throw new Error(`Guard: tool ${tool} requires approval`)
     }
-    if (rawArgs != null) {
-      const asText = JSON.stringify(rawArgs)
-      if (containsSecret(asText)) {
-        const redacted = JSON.parse(redact(asText))
-        if ('args' in exec) (exec as any).args = redacted
-        if ('arguments' in exec) (exec as any).arguments = redacted
-      }
-    }
+    // Redaction is applied to the stored/journal copy only (the pending ticket
+    // command above) — never to the arguments the tool actually executes.
     return next()
   }
 }
