@@ -1,178 +1,131 @@
 import { execSync } from 'node:child_process'
 import type { Context } from '@deepseek-ai/cordis'
-import { ApprovalStore } from './approval-store.js'
 import { PermissionPolicy } from './permission-policy.js'
-import { PendingStore, ticketHash } from './pending.js'
+import { Journal, type AskOutcome } from './journal.js'
 import { redact } from './redact.js'
-import { checkSandbox, extractCommandText, isBlockedCommand, isBlockedGitCommand, resolveCurrentBranch } from './sandbox.js'
+import { classify } from './rules.js'
+import { decide, renderReason } from './decide.js'
+import { DEFAULT_CONFIG, loadGuardConfig, type GuardConfigV2 } from './config.js'
+import { retireLegacyStore } from './migrate.js'
 import { apply as applyFullScan } from './full-scan-tool.js'
-import { applyApproveTools } from './approve-tool.js'
 import type { GuardToolExecution, GuardPreToolDecision } from './augment.js'
 
-function getCurrentBranch(cwd?: string): string | undefined {
-  if (!cwd) return undefined
+export interface GuardDeps {
+  journal: Journal
+  policy: PermissionPolicy
+  readConfig: () => Promise<GuardConfigV2>
+  branchOf?: (dir: string) => string | undefined
+  requestApproval: (req: { agent?: unknown; toolName: string; callId?: string; reason: string; signal?: AbortSignal }) => Promise<AskOutcome>
+  now?: () => number
+}
+
+/**
+ * Outcome vocabulary for the deny message. `unavailable` is the fail-closed
+ * case that matters most: no answerer is attached to this session, so the
+ * operation cannot be approved and must not silently proceed.
+ */
+const EXPLAIN: Record<AskOutcome, string> = {
+  granted: 'granted once',
+  rejected: 'the user rejected this operation',
+  cancelled: 'the approval prompt was cancelled',
+  unavailable: 'no approval channel is available for this session (start a session under the full-access-ask preset)',
+  error: 'the approval request failed (see the guard journal)',
+}
+
+/**
+ * The guard pipeline: classify the call into a rule id, resolve the rule's tier,
+ * journal the decision, then act — `next()` for allow/journal, a deny decision
+ * for deny, and for ask a NATIVE approval request to DSH's `approval` service.
+ *
+ * Every branch journals before it returns, and the journal is optional in the
+ * failure direction only: a journal write that fails is logged and changes no
+ * decision (see `Journal.append`).
+ */
+export function createGuardHandler(deps: GuardDeps) {
+  const now = deps.now ?? Date.now
+  return async (exec: GuardToolExecution, next: () => Promise<GuardPreToolDecision>): Promise<GuardPreToolDecision> => {
+    const tool = exec.name ?? exec.tool ?? ''
+    const args = exec.args ?? exec.arguments
+    const cwd = exec.agent?.session?.header?.cwd
+    const session = exec.agent?.session?.id
+    const cfg = await deps.readConfig().catch(() => DEFAULT_CONFIG)
+    const settings = {
+      protectedBranches: cfg.protectedBranches,
+      protectedPaths: cfg.protectedPaths,
+      guardPaths: cfg.guardPaths,
+    }
+    const verdict = classify({ tool, args, cwd, settings, branchOf: deps.branchOf })
+    const { tier } = decide(verdict, cfg.rules)
+
+    if (!deps.policy.isAllowed(tool, args)) {
+      await deps.journal.append({ session, tool, rule: 'policy.deny', tier: 'deny', target: verdict.target, cwd, outcome: 'denied' })
+      return { kind: 'deny', reason: `tool ${tool} denied by policy` }
+    }
+    if (tier === 'allow') return next()
+    if (tier === 'journal') {
+      await deps.journal.append({ session, tool, rule: verdict.ruleId, tier, target: verdict.target, repo: verdict.repo, branch: verdict.branch, cwd, outcome: 'passed' })
+      return next()
+    }
+    const reason = renderReason(verdict, redact)
+    if (tier === 'deny') {
+      await deps.journal.append({ session, tool, rule: verdict.ruleId, tier, target: verdict.target, cwd, outcome: 'denied' })
+      return { kind: 'deny', reason }
+    }
+    const t0 = now()
+    const outcome = await deps.requestApproval({
+      agent: exec.agent, toolName: tool, callId: exec.callId, reason, signal: exec.signal,
+    })
+    await deps.journal.append({
+      session, tool, rule: verdict.ruleId, tier, target: verdict.target, repo: verdict.repo,
+      branch: verdict.branch, cwd, outcome, askMs: now() - t0,
+    })
+    return outcome === 'granted' ? { kind: 'allow' } : { kind: 'deny', reason: `${reason} — ${EXPLAIN[outcome]}` }
+  }
+}
+
+/**
+ * Branch of the repo a command targets. The caller resolves the repo directory
+ * itself (`git -C` / `cd` handling lives in `rules.ts`); an EMPTY directory is
+ * the "no resolvable repo" sentinel and must never be turned into
+ * `git -C ""`, which would silently resolve to the session cwd and re-create
+ * the false positives the repo resolution exists to remove.
+ */
+export function branchOf(dir: string): string | undefined {
+  if (!dir) return undefined
   try {
-    return execSync('git branch --show-current', { cwd, timeout: 800, encoding: 'utf-8' }).trim() || undefined
+    return execSync('git branch --show-current', { cwd: dir, timeout: 800, encoding: 'utf-8' }).trim() || undefined
   } catch {
     return undefined
   }
 }
 
-function getSessionCwd(exec: unknown): string | undefined {
-  const e: any = exec as any
-  return (
-    e?.agent?.session?.header?.cwd ??
-    e?.session?.header?.cwd ??
-    e?.header?.cwd ??
-    e?.cwd ??
-    undefined
-  )
-}
-
-async function readGuardConfig(): Promise<Record<string, unknown>> {
-  try {
-    const mod: any = await import('@ddtcorex/dsh-maestro-config-lib')
-    if (typeof mod.load === 'function') {
-      try {
-        const doc = await mod.load()
-        if (doc?.domains?.guard && typeof doc.domains.guard === 'object' && !Array.isArray(doc.domains.guard)) {
-          return doc.domains.guard as Record<string, unknown>
-        }
-      } catch {}
-    }
-    if (typeof mod.get === 'function') {
-      try {
-        const g = await mod.get('guard')
-        if (g && typeof g === 'object' && !Array.isArray(g)) return g as Record<string, unknown>
-      } catch {}
-    }
-    if (typeof mod.readFlat === 'function') {
-      try {
-        const flat = await mod.readFlat()
-        if (flat && typeof flat === 'object' && (flat as any).guard && typeof (flat as any).guard === 'object') {
-          return (flat as any).guard as Record<string, unknown>
-        }
-      } catch {}
-    }
-  } catch {}
-  return {}
-}
-
-export function createGuardHandler(
-  store: ApprovalStore,
-  policy: PermissionPolicy,
-  pending: PendingStore,
-  readConfig: () => Promise<Record<string, unknown>> = readGuardConfig,
-) {
-  return async (exec: GuardToolExecution, next: () => Promise<GuardPreToolDecision>): Promise<GuardPreToolDecision> => {
-    const tool = (exec as GuardToolExecution).name ?? (exec as GuardToolExecution).tool ?? ''
-    const rawArgs = (exec as any)?.args ?? (exec as any)?.arguments
-
-    // Sandbox hard gate: credential paths, ~/.cloudflared, NPM_TOKEN, git-protection, publish, cwd (via checkSandbox)
-    const cwd = getSessionCwd(exec)
-    // Branch detection follows the repo the command actually targets (cd / git -C),
-    // not the session cwd — a session whose cwd repo sits on master must not block
-    // feature-branch pushes inside sub-repos (fix/guard-protection-precision).
-    const commandText = extractCommandText(rawArgs)
-    // Resolve the current branch lazily, only when the executed command could
-    // plausibly be a git/gh operation — otherwise every tool call (reads,
-    // writes, memory, unrelated bash) would spawn `git branch --show-current`
-    // for nothing.
-    const branchRelevant = commandText != null && /\b(git|gh)\b/i.test(commandText)
-    const currentBranch = branchRelevant ? resolveCurrentBranch(commandText, cwd, getCurrentBranch) : undefined
-    const asTextForSandbox = rawArgs != null ? JSON.stringify(rawArgs) : ''
-    const combinedForCheck = `${tool} ${asTextForSandbox}`
-    // Read guard config at runtime (injected lists) — fallback to defaults when empty
-    const guardCfg = await readConfig().catch(() => ({} as Record<string, unknown>))
-    const credentialPaths = Array.isArray((guardCfg as any).credentialPaths) ? (guardCfg as any).credentialPaths as string[] : undefined
-    const gitProtection = (guardCfg as any).gitProtection && typeof (guardCfg as any).gitProtection === 'object' ? (guardCfg as any).gitProtection as { enabled: boolean; branches: string[] } : undefined
-    const publishBlocked = typeof (guardCfg as any).publishBlocked === 'boolean' ? (guardCfg as any).publishBlocked as boolean : undefined
-    const cwdContainment = typeof (guardCfg as any).cwdContainment === 'boolean' ? (guardCfg as any).cwdContainment as boolean : undefined
-
-    const publishBlockedEffective = publishBlocked ?? true
-    const gitEnabled = gitProtection?.enabled ?? true
-    const branches = gitProtection?.branches ?? ['master', 'main']
-
-    const isPublish = publishBlockedEffective && commandText ? isBlockedCommand(commandText) : false
-    let approvedForPublish = false
-    if (isPublish) {
-      approvedForPublish =
-        (await store.isApproved('publish')) ||
-        (await store.isApproved('pnpm-publish')) ||
-        (await store.isApproved('pnpm publish')) ||
-        (await store.isApproved(tool))
-    }
-    const isGitProtected = gitEnabled && commandText ? isBlockedGitCommand(commandText, currentBranch, branches) : false
-    let approvedForGit = false
-    if (isGitProtected) {
-      approvedForGit =
-        (await store.isApproved('git-protection')) ||
-        (await store.isApproved('publish')) ||
-        (await store.isApproved(tool))
-    }
-    const sandboxRes = checkSandbox(tool, rawArgs, {
-      cwd,
-      currentBranch,
-      approved: isGitProtected ? approvedForGit : approvedForPublish,
-      credentialPaths,
-      gitProtection,
-      publishBlocked,
-      cwdContainment,
-    })
-    if (sandboxRes.blocked) {
-      const scope: 'git-protection' | 'publish' = sandboxRes.reason?.includes('publish') ? 'publish' : 'git-protection'
-      const sessionId = (exec as any)?.agent?.session?.id ?? undefined
-      // Hash over the executed command when available, not the full (tool + args)
-      // serialization — cosmetic arg fields (description, timeoutMs) must not
-      // mint a fresh ticket for a re-run of the same command (fix/guard-protection-precision).
-      const canonical = commandText ?? combinedForCheck
-      const cmdText = redact(canonical.slice(0, 300))
-      const hash = ticketHash(scope, cmdText)
-      const approved = await pending.findApprovedByHash(scope, hash, sessionId)
-      if (approved) {
-        await pending.consume(approved.id) // exactly one retry passes (consume is mutex-serialized)
-      }
-      if (!approved) {
-        try {
-          const req = await pending.record({
-            scope,
-            tool,
-            command: cmdText,
-            reason: sandboxRes.reason ?? 'blocked',
-            sessionId,
-            cwd,
-          })
-          throw new Error(`Guard: ${sandboxRes.reason} — request ${req.id}; present this exact operation in the conversation, then approve via the approve tool after the human consents`)
-        } catch (e) {
-          if (e instanceof Error && e.message.startsWith('Guard:')) throw e
-          throw new Error(`Guard: ${sandboxRes.reason}`)
-        }
-      }
-      // approved: fall through to the shared tail (policy check, secret redaction, next())
-    }
-
-    if (!policy.isAllowed(tool, rawArgs)) {
-      throw new Error(`Guard: tool ${tool} denied by policy`)
-    }
-    if (tool === 'danger-tool' && !(await store.isApproved(tool))) {
-      throw new Error(`Guard: tool ${tool} requires approval`)
-    }
-    // Redaction is applied to the stored/journal copy only (the pending ticket
-    // command above) — never to the arguments the tool actually executes.
-    return next()
-  }
+/** The DSH approval service, structurally typed (the guard never imports it). */
+interface NativeApproval {
+  request(req: { agent: unknown; toolName: string; callId?: string; reason: string; signal?: AbortSignal }): Promise<string>
 }
 
 export default {
   inject: ['tools'] as const,
   apply(ctx: Context) {
-    const store = new ApprovalStore()
-    const pending = new PendingStore()
+    const journal = new Journal()
     const policy = new PermissionPolicy({ deny: ['danger-tool'] })
-    const handler = createGuardHandler(store, policy, pending)
+    const requestApproval = async (req: { agent?: unknown; toolName: string; callId?: string; reason: string; signal?: AbortSignal }): Promise<AskOutcome> => {
+      const approval = ctx.get('approval') as NativeApproval | undefined
+      if (!approval || req.agent === undefined) return 'unavailable'
+      try {
+        const outcome = await approval.request({
+          agent: req.agent, toolName: req.toolName, callId: req.callId, reason: req.reason, signal: req.signal,
+        })
+        return outcome === 'allowed-once' ? 'granted' : (outcome as AskOutcome)
+      } catch (e) {
+        console.error('[dsh-maestro-guard] approval request failed:', (e as Error)?.message)
+        return 'error'
+      }
+    }
+    const handler = createGuardHandler({ journal, policy, readConfig: loadGuardConfig, branchOf, requestApproval })
     ctx.effect(() => ctx.on('tools/pre-execute', handler as any))
+    ctx.effect(() => { void retireLegacyStore(journal); return () => {} }, 'guard-retire-legacy-store')
     // register on-demand full-scan tool (Task 4) alongside guard handler
     applyFullScan(ctx, {})
-    applyApproveTools(ctx, { pending })
-  }
+  },
 }

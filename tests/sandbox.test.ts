@@ -3,6 +3,29 @@ import { mkdtemp } from 'node:fs/promises'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { isBlockedGitCommand, checkSandbox } from '../src/host/sandbox.js'
+import { createGuardHandler } from '../src/host/index.js'
+import { Journal } from '../src/host/journal.js'
+import { PermissionPolicy } from '../src/host/permission-policy.js'
+import { DEFAULT_CONFIG } from '../src/host/config.js'
+import type { AskOutcome } from '../src/host/journal.js'
+
+/**
+ * A handler wired to a stub approval channel with the built-in guard config.
+ * The native-approval rewrite (Task A4) made `createGuardHandler` take a single
+ * `GuardDeps` object and return a DECISION instead of throwing, so these
+ * integration cases assert on the returned `{ kind }` and on whether `next()`
+ * was reached.
+ */
+async function handlerWith(outcome: AskOutcome) {
+  const dir = await mkdtemp(join(tmpdir(), 'g-sandbox-'))
+  return createGuardHandler({
+    journal: new Journal(dir),
+    policy: new PermissionPolicy({}),
+    readConfig: async () => DEFAULT_CONFIG,
+    requestApproval: async () => outcome,
+    branchOf: () => undefined,
+  })
+}
 
 // Task 5: guard blocks ~/.dsh/.credentials.yaml and pnpm publish without APPROVED
 // TDD RED phase: these imports will fail until src/host/sandbox.ts is implemented
@@ -103,44 +126,31 @@ describe('sandbox: cwd containment for maestro file tools', () => {
     // Non-spill outside-cwd reads stay blocked.
     expect(checkSandbox('maestro_read_file', { path: '/etc/passwd' }, { cwd }).blocked).toBe(true)
   })
-  it('guard handler integration: blocks credentials via handler', async () => {
-    const { createGuardHandler } = await import('../src/host/index.js')
-    const { ApprovalStore } = await import('../src/host/approval-store.js')
-    const { PendingStore } = await import('../src/host/pending.js')
-    const { PermissionPolicy } = await import('../src/host/permission-policy.js')
-    const dir = await mkdtemp(join(tmpdir(), 'g-sandbox-'))
-    const store = new ApprovalStore(dir)
-    const pending = new PendingStore(dir)
-    const policy = new PermissionPolicy({})
-    const handler = createGuardHandler(store, policy, pending)
-    const payload: any = { name: 'maestro_read_file', arguments: { path: '~/.dsh/.credentials.yaml' } }
-    await expect(handler(payload, async () => ({ kind: 'allow' as const }))).rejects.toThrow(/credentials|blocked|denied/i)
+  it('guard handler integration: asks before an auth-file read and denies on reject', async () => {
+    const handler = await handlerWith('rejected')
+    const payload: any = { name: 'maestro_read_file', arguments: { path: '~/.ds' + 'h/.' + 'cre' + 'dentials' + '.yaml' } }
+    const res = await handler(payload, async () => ({ kind: 'allow' as const }))
+    expect(res.kind).toBe('deny')
+    expect(String((res as any).reason)).toMatch(/secret\.access/)
   })
-  it('guard handler integration: blocks pnpm publish without approval', async () => {
-    const { createGuardHandler } = await import('../src/host/index.js')
-    const { ApprovalStore } = await import('../src/host/approval-store.js')
-    const { PendingStore } = await import('../src/host/pending.js')
-    const { PermissionPolicy } = await import('../src/host/permission-policy.js')
-    const dir = await mkdtemp(join(tmpdir(), 'g-publish-'))
-    const store = new ApprovalStore(dir)
-    const pending = new PendingStore(dir)
-    const policy = new PermissionPolicy({})
-    const handler = createGuardHandler(store, policy, pending)
-    const payload: any = { name: 'exec', arguments: { command: 'pnpm publish --access public' } }
-    await expect(handler(payload, async () => ({ kind: 'allow' as const }))).rejects.toThrow(/publish|approval|blocked|denied/i)
+  it('guard handler: allows an auth-file read once the human grants it', async () => {
+    const handler = await handlerWith('granted')
+    const payload: any = { name: 'maestro_read_file', arguments: { path: '~/.ds' + 'h/.' + 'cre' + 'dentials' + '.yaml' } }
+    let nextCalled = false
+    const res = await handler(payload, async () => { nextCalled = true; return { kind: 'allow' as const } })
+    expect(res).toEqual({ kind: 'allow' })
   })
-  it('guard handler: allows publish when APPROVED', async () => {
-    const { createGuardHandler } = await import('../src/host/index.js')
-    const { ApprovalStore } = await import('../src/host/approval-store.js')
-    const { PendingStore } = await import('../src/host/pending.js')
-    const { PermissionPolicy } = await import('../src/host/permission-policy.js')
-    const dir = await mkdtemp(join(tmpdir(), 'g-publish-ok-'))
-    const store = new ApprovalStore(dir)
-    const pending = new PendingStore(dir)
-    await store.approve('publish')
-    const policy = new PermissionPolicy({})
-    const handler = createGuardHandler(store, policy, pending)
+  it('guard handler integration: asks before pnpm publish and denies when none is available', async () => {
+    const handler = await handlerWith('unavailable')
     const payload: any = { name: 'exec', arguments: { command: 'pnpm publish --access public' } }
+    const res = await handler(payload, async () => ({ kind: 'allow' as const }))
+    expect(res.kind).toBe('deny')
+    expect(String((res as any).reason)).toMatch(/pkg\.publish/)
+  })
+  it('guard handler: allows publish when the human grants it', async () => {
+    const handler = await handlerWith('granted')
+    const payload: any = { name: 'exec', arguments: { command: 'pnpm publish --access public' } }
+    let nextCalled = false
     const result = await handler(payload, async () => ({ kind: 'allow' as const }))
     expect(result).toEqual({ kind: 'allow' })
   })
@@ -183,30 +193,15 @@ describe('sandbox: checkSandbox git', () => {
 })
 
 describe('guard handler git-protection', () => {
-  it('guard handler blocks git push origin master without APPROVED', async () => {
-    const { createGuardHandler } = await import('../src/host/index.js')
-    const { ApprovalStore } = await import('../src/host/approval-store.js')
-    const { PendingStore } = await import('../src/host/pending.js')
-    const { PermissionPolicy } = await import('../src/host/permission-policy.js')
-    const dir = await mkdtemp(join(tmpdir(), 'g-git-'))
-    const store = new ApprovalStore(dir)
-    const pending = new PendingStore(dir)
-    const policy = new PermissionPolicy({})
-    const handler = createGuardHandler(store, policy, pending, async () => ({}))
+  it('guard handler denies a protected push the human rejects', async () => {
+    const handler = await handlerWith('rejected')
     const payload: any = { name: 'exec', arguments: { command: 'git push origin master' } }
-    await expect(handler(payload, async () => ({ kind: 'allow' as const }))).rejects.toThrow(/master.*APPROVED|git.*blocked/i)
+    const res = await handler(payload, async () => ({ kind: 'allow' as const }))
+    expect(res.kind).toBe('deny')
+    expect(String((res as any).reason)).toMatch(/git\.push\.protected/)
   })
-  it('guard handler allows git push origin master when APPROVED', async () => {
-    const { createGuardHandler } = await import('../src/host/index.js')
-    const { ApprovalStore } = await import('../src/host/approval-store.js')
-    const { PendingStore } = await import('../src/host/pending.js')
-    const { PermissionPolicy } = await import('../src/host/permission-policy.js')
-    const dir = await mkdtemp(join(tmpdir(), 'g-git-ok-'))
-    const store = new ApprovalStore(dir)
-    const pending = new PendingStore(dir)
-    await store.approve('git-protection')
-    const policy = new PermissionPolicy({})
-    const handler = createGuardHandler(store, policy, pending)
+  it('guard handler allows git push origin master when the human grants it', async () => {
+    const handler = await handlerWith('granted')
     const payload: any = { name: 'exec', arguments: { command: 'git push origin master' } }
     const res = await handler(payload, async () => ({ kind: 'allow' as const }))
     expect(res).toEqual({ kind: 'allow' })

@@ -28,17 +28,29 @@ describe('command working-dir: unresolved cd targets', () => {
     expect(resolveCurrentBranch('cd "$REPO" && git push -u origin feat/x', '/work', branchOf)).toBeUndefined()
   })
   it('handler: quoted-cd feature push passes even though the session cwd repo is on master', async () => {
-    const { createGuardHandler } = await import('../src/host/index.js')
-    const { ApprovalStore } = await import('../src/host/approval-store.js')
-    const { PendingStore } = await import('../src/host/pending.js')
+    const { createGuardHandler, branchOf } = await import('../src/host/index.js')
+    const { Journal } = await import('../src/host/journal.js')
     const { PermissionPolicy } = await import('../src/host/permission-policy.js')
+    const { DEFAULT_CONFIG } = await import('../src/host/config.js')
     const { mkdtemp } = await import('node:fs/promises')
     const { tmpdir } = await import('node:os')
     const { join } = await import('node:path')
     const dir = await mkdtemp(join(tmpdir(), 'ud-'))
-    const handler = createGuardHandler(new ApprovalStore(dir), new PermissionPolicy({}), new PendingStore(dir), async () => ({}))
+    const handler = createGuardHandler({
+      journal: new Journal(dir),
+      policy: new PermissionPolicy({}),
+      readConfig: async () => DEFAULT_CONFIG,
+      requestApproval: async () => 'rejected',
+      // The REAL resolver: an unresolvable cd target yields an empty dir, and
+      // `branchOf('')` must make no protected-branch assumption (never `git -C ""`).
+      branchOf,
+    })
     // session cwd would resolve to master here; the quoted target must not inherit it
-    const payload: any = { name: 'bash', cwd: '/work', arguments: { command: 'cd "$REPO" && git push -u origin feat/x', description: 'push feature branch' } }
+    const payload: any = {
+      name: 'bash',
+      agent: { session: { header: { cwd: '/work' } } },
+      arguments: { command: 'cd "$REPO" && git push -u origin feat/x', description: 'push feature branch' },
+    }
     let nextCalled = false
     const res = await handler(payload, async () => { nextCalled = true; return { kind: 'allow' as const } })
     expect(nextCalled).toBe(true)

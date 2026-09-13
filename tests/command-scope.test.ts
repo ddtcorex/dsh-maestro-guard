@@ -1,13 +1,35 @@
 import { describe, it, expect } from 'vitest'
+import { mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createGuardHandler } from '../src/host/index.js'
+import { Journal } from '../src/host/journal.js'
+import { PermissionPolicy } from '../src/host/permission-policy.js'
+import { DEFAULT_CONFIG } from '../src/host/config.js'
+import type { AskOutcome } from '../src/host/journal.js'
 
 // Task 3 (fix/guard-protection-precision): match protected ops on the executed
 // command surface only. Text that merely MENTIONS a protected phrase — echo
 // strings, script bodies, tool description args, non-shell tool content — must
-// not mint a guard ticket. Regression class observed live: six analysis calls
-// (node -e scripts, memory writes, write tool) were blocked purely for quoting
-// the phrasings being investigated.
+// not be gated. Regression class observed live: six analysis calls (node -e
+// scripts, memory writes, write tool) were blocked purely for quoting the
+// phrasings being investigated.
+//
+// Task A4 replaced the ticket flow with the native ask, so the handler cases
+// below assert on the returned decision instead of on a thrown Guard error.
 
 const PUBLISH = ['pnpm', 'publish'].join(' ')
+
+async function handler(outcome: AskOutcome = 'rejected') {
+  const dir = await mkdtemp(join(tmpdir(), 'cs-'))
+  return createGuardHandler({
+    journal: new Journal(dir),
+    policy: new PermissionPolicy({}),
+    readConfig: async () => DEFAULT_CONFIG,
+    requestApproval: async () => outcome,
+    branchOf: () => 'master',
+  })
+}
 
 describe('command-surface matching', () => {
   it('extractCommandText returns the command field of shell-style args', async () => {
@@ -45,53 +67,29 @@ describe('command-surface matching', () => {
     expect(res.blocked).toBe(false)
   })
 
-  it('handler: phrasing in the description field neither blocks nor creates a ticket', async () => {
-    const { createGuardHandler } = await import('../src/host/index.js')
-    const { ApprovalStore } = await import('../src/host/approval-store.js')
-    const { PendingStore } = await import('../src/host/pending.js')
-    const { PermissionPolicy } = await import('../src/host/permission-policy.js')
-    const { mkdtemp } = await import('node:fs/promises')
-    const { tmpdir } = await import('node:os')
-    const { join } = await import('node:path')
-    const dir = await mkdtemp(join(tmpdir(), 'cs-'))
-    const pending = new PendingStore(dir)
-    const handler = createGuardHandler(new ApprovalStore(dir), new PermissionPolicy({}), pending, async () => ({}))
+  it('handler: phrasing in the description field neither blocks nor is gated', async () => {
+    const h = await handler()
     const payload: any = { name: 'bash', arguments: { command: 'true', description: 'mentions git push origin master and ' + PUBLISH } }
     let nextCalled = false
-    await handler(payload, async () => { nextCalled = true; return { kind: 'allow' as const } })
+    const res = await h(payload, async () => { nextCalled = true; return { kind: 'allow' as const } })
     expect(nextCalled).toBe(true)
-    expect(await pending.list()).toHaveLength(0)
+    expect(res).toEqual({ kind: 'allow' })
   })
 
   it('handler: quoted echo of a protected phrase is allowed', async () => {
-    const { createGuardHandler } = await import('../src/host/index.js')
-    const { ApprovalStore } = await import('../src/host/approval-store.js')
-    const { PendingStore } = await import('../src/host/pending.js')
-    const { PermissionPolicy } = await import('../src/host/permission-policy.js')
-    const { mkdtemp } = await import('node:fs/promises')
-    const { tmpdir } = await import('node:os')
-    const { join } = await import('node:path')
-    const dir = await mkdtemp(join(tmpdir(), 'cs2-'))
-    const handler = createGuardHandler(new ApprovalStore(dir), new PermissionPolicy({}), new PendingStore(dir), async () => ({}))
+    const h = await handler()
     const payload: any = { name: 'bash', arguments: { command: 'echo "git push origin master"' } }
     let nextCalled = false
-    await handler(payload, async () => { nextCalled = true; return { kind: 'allow' as const } })
+    const res = await h(payload, async () => { nextCalled = true; return { kind: 'allow' as const } })
     expect(nextCalled).toBe(true)
+    expect(res).toEqual({ kind: 'allow' })
   })
 
-  it('handler: a genuine master push stays blocked', async () => {
-    const { createGuardHandler } = await import('../src/host/index.js')
-    const { ApprovalStore } = await import('../src/host/approval-store.js')
-    const { PendingStore } = await import('../src/host/pending.js')
-    const { PermissionPolicy } = await import('../src/host/permission-policy.js')
-    const { mkdtemp } = await import('node:fs/promises')
-    const { tmpdir } = await import('node:os')
-    const { join } = await import('node:path')
-    const dir = await mkdtemp(join(tmpdir(), 'cs3-'))
-    const handler = createGuardHandler(new ApprovalStore(dir), new PermissionPolicy({}), new PendingStore(dir), async () => ({}))
+  it('handler: a genuine master push is denied when the human rejects', async () => {
+    const h = await handler('rejected')
     const payload: any = { name: 'bash', arguments: { command: 'git push origin master' } }
-    let err: any
-    try { await handler(payload, async () => ({ kind: 'allow' as const })) } catch (e) { err = e }
-    expect(err).toBeDefined()
+    const res = await h(payload, async () => ({ kind: 'allow' as const }))
+    expect(res.kind).toBe('deny')
+    expect(String((res as any).reason)).toContain('git.push.protected')
   })
 })

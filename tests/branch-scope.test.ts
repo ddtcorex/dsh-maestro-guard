@@ -3,6 +3,10 @@ import { mkdtemp, mkdir } from 'node:fs/promises'
 import { execSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createGuardHandler, branchOf } from '../src/host/index.js'
+import { Journal } from '../src/host/journal.js'
+import { PermissionPolicy } from '../src/host/permission-policy.js'
+import { DEFAULT_CONFIG } from '../src/host/config.js'
 
 // Task 1 (fix guard-protection-precision): resolve the repo the command actually
 // runs in (cd / git -C), instead of always using the session cwd. Regression for:
@@ -28,10 +32,10 @@ describe('sandbox: command working-dir resolution', () => {
   })
   it('resolveCurrentBranch asks the branch of the command target, not the session cwd', async () => {
     const { resolveCurrentBranch } = await import('../src/host/sandbox.js')
-    const branchOf = (dir: string) => (dir === '/work/repo' ? 'feat/x' : dir === '/work' ? 'master' : undefined)
-    expect(resolveCurrentBranch('cd /work/repo && git push -u origin feat/x', '/work', branchOf)).toBe('feat/x')
-    expect(resolveCurrentBranch('git push origin feat/x', '/work', branchOf)).toBe('master') // no cd -> session cwd
-    expect(resolveCurrentBranch('cd /nowhere && git push', '/work', branchOf)).toBeUndefined() // target not a repo
+    const branchOfStub = (dir: string) => (dir === '/work/repo' ? 'feat/x' : dir === '/work' ? 'master' : undefined)
+    expect(resolveCurrentBranch('cd /work/repo && git push -u origin feat/x', '/work', branchOfStub)).toBe('feat/x')
+    expect(resolveCurrentBranch('git push origin feat/x', '/work', branchOfStub)).toBe('master') // no cd -> session cwd
+    expect(resolveCurrentBranch('cd /nowhere && git push', '/work', branchOfStub)).toBeUndefined() // target not a repo
   })
 })
 
@@ -50,18 +54,24 @@ describe('guard handler: branch-scope end-to-end (real git repos)', () => {
     execSync('git -c user.name=t -c user.email=t@t commit --allow-empty -q -m init', { cwd: featRepo })
   })
 
+  async function handlerFor(dir: string) {
+    return createGuardHandler({
+      journal: new Journal(dir),
+      policy: new PermissionPolicy({}),
+      readConfig: async () => DEFAULT_CONFIG,
+      requestApproval: async () => 'rejected',
+      branchOf,
+    })
+  }
+
   it('feature push with cd target passes even though the session cwd repo sits on master', async () => {
-    const { createGuardHandler } = await import('../src/host/index.js')
-    const { ApprovalStore } = await import('../src/host/approval-store.js')
-    const { PendingStore } = await import('../src/host/pending.js')
-    const { PermissionPolicy } = await import('../src/host/permission-policy.js')
     const dir = await mkdtemp(join(tmpdir(), 'g-handler-'))
-    // Hermetic: force default guard config (git protection enabled) instead of
+    // Hermetic: built-in guard config (git protection enabled) instead of
     // whatever the ambient ~/.dsh settings.json currently says.
-    const handler = createGuardHandler(new ApprovalStore(dir), new PermissionPolicy({}), new PendingStore(dir), async () => ({}))
+    const handler = await handlerFor(dir)
     const payload: any = {
       name: 'bash',
-      cwd: rootRepo,
+      agent: { session: { header: { cwd: rootRepo } } },
       arguments: { command: `cd ${featRepo} && git push -u origin fix/jobs-x 2>&1 | tail -5`, description: 'push fix branch' },
     }
     let nextCalled = false
@@ -71,17 +81,15 @@ describe('guard handler: branch-scope end-to-end (real git repos)', () => {
   })
 
   it('a real master push stays blocked even when the command target is a feature-branch repo', async () => {
-    const { createGuardHandler } = await import('../src/host/index.js')
-    const { ApprovalStore } = await import('../src/host/approval-store.js')
-    const { PendingStore } = await import('../src/host/pending.js')
-    const { PermissionPolicy } = await import('../src/host/permission-policy.js')
     const dir = await mkdtemp(join(tmpdir(), 'g-handler2-'))
-    const handler = createGuardHandler(new ApprovalStore(dir), new PermissionPolicy({}), new PendingStore(dir), async () => ({}))
+    const handler = await handlerFor(dir)
     const payload: any = {
       name: 'bash',
-      cwd: rootRepo,
+      agent: { session: { header: { cwd: rootRepo } } },
       arguments: { command: `cd ${featRepo} && git push origin master` },
     }
-    await expect(handler(payload, async () => ({ kind: 'allow' as const }))).rejects.toThrow(/master.*APPROVED|blocked/i)
+    const res = await handler(payload, async () => ({ kind: 'allow' as const }))
+    expect(res.kind).toBe('deny')
+    expect(String((res as any).reason)).toMatch(/git\.push\.protected/)
   })
 })
