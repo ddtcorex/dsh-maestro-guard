@@ -127,8 +127,33 @@ export function extractCommandText(args: unknown): string | undefined {
 }
 
 /** Collapse quoted spans — text inside quotes is data (echo/printf/script bodies), not argv. */
-function stripQuoted(cmd: string): string {
+export function stripQuoted(cmd: string): string {
   return cmd.replace(/"[^"]*"/g, ' ').replace(/'[^']*'/g, ' ')
+}
+
+/**
+ * Collapse heredoc bodies — the lines fed to a command's stdin are data, not
+ * argv. A heredoc body routinely contains protected path literals (setup
+ * scripts, config generators) which must not be mistaken for an access.
+ * Run this AFTER `stripQuoted` so a quoted delimiter (`<<'EOF'`) is already
+ * reduced to its bare form.
+ */
+export function stripHeredocs(cmd: string): string {
+  return cmd.replace(/<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?[^\r\n]*\r?\n[\s\S]*?^\1\s*$/gm, ' ')
+}
+
+/**
+ * The path a file-oriented tool call targets, from the args shapes the DSH and
+ * Maestro file tools use (`path` / `file` / `file_path` / `filePath`, or a bare
+ * string arg). Returns undefined when the call carries no path.
+ */
+export function extractPathField(args: unknown): string | undefined {
+  if (args == null) return undefined
+  if (typeof args === 'string') return args
+  if (typeof args !== 'object') return undefined
+  const a = args as Record<string, unknown>
+  const v = a.path ?? a.file ?? a.file_path ?? a.filePath
+  return typeof v === 'string' ? v : undefined
 }
 
 export function isBlockedCommand(cmd: string): boolean {
@@ -222,6 +247,31 @@ export function isRuntimeSpillPath(target: string): boolean {
   const resolved = resolve(expandHome(target.trim()))
   const prefix = join(tmpdir(), 'dsh-spill-')
   return resolved.startsWith(prefix)
+}
+
+/**
+ * True when target resolves inside the OS temp dir (`os.tmpdir()`).
+ * Scratch work is deliberately exempt from the outside-cwd write gate: a
+ * temporary deliverable (`/tmp/x.md`, `$TMPDIR/...`) is not a filesystem
+ * escape, and gating it would re-introduce the false-positive class the
+ * outside-cwd rule exists to remove. Resolution reuses the module's
+ * expandHome/resolve helpers, and containment is checked with a trailing
+ * separator so `/tmpfoo` never matches a temp dir of `/tmp`.
+ *
+ * `base` is the directory a RELATIVE target resolves against, and it must be
+ * the same base `isOutsideCwd` uses — the session cwd. The default
+ * (`process.cwd()`) is kept for backward compatibility with callers that only
+ * ever pass absolute targets, but resolving against the host cwd while
+ * `isOutsideCwd` resolves against the session cwd lets the two tests disagree:
+ * a relative path that escapes the session cwd could then be exempted as
+ * "temporary" purely because of where the host process happens to run.
+ */
+export function isWithinTempDir(target: string, base?: string): boolean {
+  if (!target || typeof target !== 'string') return false
+  const resolved = resolve(expandHome(base ?? process.cwd()), expandHome(target.trim()))
+  const tmp = resolve(expandHome(tmpdir()))
+  if (resolved === tmp) return true
+  return resolved.startsWith(tmp + '/')
 }
 
 export interface SandboxCheckResult {
@@ -339,4 +389,20 @@ export function guard(p: string, approved?: boolean): boolean {
   return true
 }
 
-export const sandbox = { isBlockedPath, isBlockedCommand, isBlockedGitCommand, isPublishBlocked, isOutsideCwd, checkSandbox, guard }
+export const sandbox = {
+  isBlockedPath,
+  isBlockedCommand,
+  isBlockedGitCommand,
+  isPublishBlocked,
+  isOutsideCwd,
+  isRuntimeSpillPath,
+  isWithinTempDir,
+  extractCommandText,
+  extractPathField,
+  getCommandWorkingDir,
+  resolveCurrentBranch,
+  stripQuoted,
+  stripHeredocs,
+  checkSandbox,
+  guard,
+}
