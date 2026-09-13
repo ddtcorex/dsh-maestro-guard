@@ -9,7 +9,7 @@ Explain the problem this PR solves and why this approach was chosen.
 ## Changes
 
 - [ ] Code updated (`src/host/` — approval-store / secret-redactor / permission-policy / Cordis row)
-- [ ] Tests added or updated (`tests/` — vitest, 27 tests)
+- [ ] Tests added or updated (`tests/` — vitest)
 - [ ] Documentation updated (`README.md` / `CONTRIBUTING.md` / `CHANGELOG.md` if needed)
 - [ ] `lib/index.js` rebuilt and verified flat (`test -f lib/index.js`)
 - [ ] Version bumped in `package.json` and `CHANGELOG.md` (if release-relevant)
