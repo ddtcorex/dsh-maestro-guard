@@ -31,18 +31,30 @@ parse → classify → decide → journal → act
    Two hard cases are decided by SHAPE rather than by a longer verb list. A segment whose first
    token cannot be a command (a `VAR=value` assignment, a `(`/`{` group opener, a shell keyword)
    or whose LATER tokens name a rule verb while `argv[0]` does not (`pkexec …`, `perf …`,
-   `my-custom-runner …`) is ambiguous, so the operation written behind it is asked about instead
-   of silently allowed. And a quoted protected path is not erased: `secret.access` reads the
-   parsed segment argv, where the tokenizer has already dropped the quotes and kept the content,
-   so `cat "<path>"`, `cp "<path>" /tmp/x`, `curl -T "<path>" …` and the write-into
-   `cp /tmp/x "<path>"` all ask just like their unquoted forms.
+   `/usr/bin/git …`, `my-custom-runner …`) is ambiguous, so the operation written behind it is
+   asked about instead of silently allowed — compared by the command BASE name, so a qualified
+   path cannot hide it. A segment LED by a mention verb (`echo`, `printf`, `grep`, `rg`, `sed`,
+   `awk`, `ls`, `find`, …) opts out of that later-token rule, because those verbs cannot execute
+   their arguments: `rg git push docs/` and `echo pnpm publish` are a search and a print, not
+   commands. `find … -exec <cmd> +` is the exception and still asks. A shell handed a `-c` script
+   by a verb the guard cannot name (`my-custom-runner bash -c "git push origin master"`) is
+   unwrapped like any other shell wrapper, so that script is judged as the command that really
+   runs. And a quoted protected path is not erased: `secret.access` reads the parsed segment argv,
+   where the tokenizer has already dropped the quotes and kept the content, so `cat "<path>"`,
+   `cp "<path>" /tmp/x`, `curl -T "<path>" …` and the write-into `cp /tmp/x "<path>"` all ask just
+   like their unquoted forms.
 
    The corpus rows `carried: interpreter inline program pushing a protected branch`, `carried:
    node -e inline program tagging a release`, `carried: quoted data mentioning a release` and the
    `protected path: quoted …` rows pin those decisions — including the deliberate fail-closed
-   trade-off that an interpreter inline program which names a protected path asks again. The one
-   deliberate raw-text exception is `guard.tamper`, which scans the **unstripped** command text:
-   tampering with the guard itself is judged on the whole command.
+   trade-off that an interpreter inline program which names a protected path asks again.
+   `guard.tamper` is the one rule that judges the raw segment text rather than a resolved shape,
+   and even there only an EDIT counts: a mutating verb (`rm`, `mv`, `cp`, `truncate`, `shred`,
+   `dd`, `tee`, `install`, `chmod`, `chown`, `sed -i`, `perl -i`) naming a guard path, or a write
+   redirection (`>`, `>>`, `2>`, `&>`) whose TARGET is one — in the absolute, `~`, `$HOME` or
+   `${HOME}` spelling. A READ of the same path (`cat`, `tail`, `head`, `grep`, `less`) is not
+   tampering and falls through to the ordinary rules, which is what makes the guard's own deny
+   text ("see the guard journal") followable.
 2. **classify** — map the call to a stable rule id (below), resolving the branch of the repo the
    command targets through its `cd` / `git -C`.
 3. **decide** — resolve the tier: the classified tier, unless `domains.guard.rules` carries an
@@ -66,10 +78,10 @@ them. There are **11**:
 | `gh.release.create` | `ask` | `gh release create` / `gh release publish` |
 | `gh.protection.delete` | `ask` | a `gh api … DELETE` against branch protection |
 | `pkg.publish` | `ask` | a package-manager publish (npm / pnpm / yarn) |
-| `secret.access` | `ask` | access to a protected credential path — **any** file tool (read *or* write) whose path field is the protected path, or a parsed segment whose argv holds both an access verb and the path (a mention-only verb such as `grep`/`ls`/`printf` is never an access, and a heredoc body is never argv) |
+| `secret.access` | `ask` | access to a protected credential path — **any** file tool (read *or* write) whose path field is the protected path, or a parsed segment whose COMMAND is an access verb and whose argv holds the path (a mention-only verb such as `grep`/`ls`/`printf` is never an access, an access verb inside a message or body is not the command, and a heredoc body is never argv) |
 | `fs.write.outside` | `ask` | a file-tool write outside the session working directory (the OS temp dir is exempt, and so is the runtime spill dir while `spillReads` is on) |
 | `net.exec.remote` | `ask` | piping a remote script into a shell (`curl … \| sh`, `source <(curl …)`) |
-| `guard.tamper` | `deny` | touching the guard's own config paths |
+| `guard.tamper` | `deny` | EDITING the guard's own config paths — a mutating verb naming one, or a write redirection targeting one, in the absolute / `~` / `$HOME` / `${HOME}` spelling (a read of the same path is not tampering) |
 
 `guard.tamper` is an unappealable `deny` floor — it cannot be downgraded by configuration.
 Every other default tier can be overridden per rule id in `domains.guard.rules`.
@@ -164,7 +176,7 @@ In the shared Maestro settings store:
 | `protectedBranches` | branch names treated as protected (default `master`, `main`) |
 | `protectedPaths` | credential paths that fire `secret.access` when any file tool targets them |
 | `guardPaths` | the guard's own config/secret paths (`guard.tamper`): the settings file, the profile row patch, the profile `package.json` that mounts the guard, and the journal + `legacy-pending.json` |
-| `journal` | `enabled`, `allowCounters`, and the retention window `retainFiles` (14) / `retainDays` (30); a non-numeric window falls back to the built-in one (unvalidated, it made `rotate()` prune every archive) |
+| `journal` | `enabled`, `allowCounters`, and the retention window `retainFiles` (14) / `retainDays` (30); a window that is not a positive integer falls back to the built-in one (a fractional value used to floor to 0 and prune every archive) |
 | `workingDirContainment` | `enabled` (default `true`) switches the `fs.write.outside` rule on/off; `spillReads` (default `true`) keeps the runtime spill dir exempt from that rule — set `false` to gate spill-dir writes too |
 
 The `journal` block is read **once at boot** (it decides whether the journal writes at all and

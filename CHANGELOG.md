@@ -103,6 +103,24 @@ All notable changes to this project are documented in this file. Format follows
 - `maestro_guard_stats` folds only closed rule ids into `byRule`/`byTier`, so the guard's own
   bookkeeping rows (`counters`, `config-legacy`, `guard.migration`, `policy.deny`) no longer appear
   as decisions; `byOutcome` still counts every row.
+- Precision follow-up on the fix wave's over-blocks and residuals:
+  - `guard.tamper` is scoped to **edits**, as the spec's deny tier says: a shell segment denies
+    only when a mutating verb (`rm`, `mv`, `cp`, `truncate`, `shred`, `dd`, `tee`, `install`,
+    `chmod`, `chown`, `sed -i`, `perl -i`) names a guard path, or a write redirection (`>`, `>>`,
+    `2>`, `&>`) targets one. Reads fall through, so the journal stays readable by the path the
+    guard's own deny text points at, and the matcher now knows the `~`, `$HOME` and `${HOME}`
+    spellings of every guard path rather than only the absolute one.
+  - A mention-led segment no longer escalates: `rg git push docs/`, `grep -rn npm publish docs`
+    and `echo pnpm publish` stay `allow` (those verbs cannot execute their arguments), while
+    `find … -exec <cmd> +` still asks.
+  - `secret.access` tests the access verb against the segment's **command**, not the whole argv,
+    so a commit message or PR body that merely writes `cat <path>` is text about the path and no
+    longer asks.
+  - A path-qualified verb resolves by base name (`/usr/bin/git` is `git`), and a `-c` script
+    handed to a shell by a verb the guard cannot name (`my-custom-runner bash -c "…"`) is parsed
+    as the command that really runs.
+  - `contractMismatch` treats a `null` argument list as absent, and a retention window must be a
+    positive INTEGER — `retainDays: 0.5` used to floor to 0 and prune every archive.
 
 ### Removed
 - `pending.json` ticket store, the approve/list tools and the unused approval store. A legacy
