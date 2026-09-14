@@ -94,6 +94,23 @@ const builtRows: CorpusRow[] = [
     expectedTier: 'allow',
     note: 'Scratch work under the OS temp dir is not a filesystem escape.',
   },
+  {
+    name: 'mention: memory entry that names a credential path',
+    tool: 'memory',
+    args: {
+      action: 'add',
+      target: 'daily',
+      content: `[2026-09-14] incident: ${CREDENTIAL_FILE} was world-readable; redact instead of blocking`,
+    },
+    cwd: '/repo',
+    expectedRule: '',
+    expectedTier: 'allow',
+    note:
+      'A non-shell tool is judged on the path it targets, never on its content — a memory entry that NAMES a '
+      + 'protected path is a mention, not an access. Measured over 1,434 session logs: the 0.2.3 text scanner '
+      + 'blocked 13 memory writes of exactly this shape between 2026-08-25 and 2026-09-14, so an incident lesson '
+      + 'naming the path could not be recorded at all. This row keeps that over-block from returning.',
+  },
 ]
 
 const allRows = [...corpus, ...builtRows]
