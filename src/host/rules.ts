@@ -10,7 +10,7 @@ import {
   OPAQUE_VERBS,
   type Segment,
 } from './parse.js'
-import { isBlockedPath, isOutsideCwd, isRuntimeSpillPath, isWithinTempDir } from './paths.js'
+import { isBlockedPath, isOutsideCwd, isRuntimeSpillPath, isWithinTempDir, pathSpellings } from './paths.js'
 
 /**
  * The closed set of rule ids the classifier can emit (the empty id is the
@@ -105,6 +105,22 @@ const WRITE_FILE_TOOLS = new Set(['write', 'edit', 'maestro_write_file', 'fs_wri
 const ACCESS_VERBS = /\b(cat|bat|head|tail|less|more|cp|scp|rsync|curl|wget|source|tee|dd|install|xxd|base64|openssl|gpg|tar|zip)\b/
 /** Verbs that only scan/print the argument itself — mentioning a path is not reading it. */
 const MENTION_VERBS = /^\s*(grep|egrep|fgrep|rg|sed|awk|echo|printf|find|ls|test|wc|sort|uniq|jq)\b/
+
+/**
+ * Verbs that WRITE the file they name. A guard path next to one of these is an
+ * EDIT, which is what the spec's deny tier covers (§5.4/§5.6: "a segment that
+ * edits the guard's own settings/config or truncates/removes the journal").
+ * Reads (`cat`, `tail`, `head`, `grep`, `less`) are deliberately absent: the
+ * guard's own deny text tells the agent to "see the guard journal", so a read
+ * has to fall through to the ordinary rules.
+ */
+const MUTATION_VERBS = new Set(['rm', 'mv', 'cp', 'truncate', 'shred', 'dd', 'tee', 'install', 'chmod', 'chown'])
+/** Editors that write only when their in-place switch is present. */
+const IN_PLACE_EDITORS = new Set(['sed', 'perl'])
+/** `-i`, `-ni`, `-i.bak`, `--in-place` — the in-place switch of those editors. */
+const IN_PLACE_FLAG = /^--in-place(?:=.*)?$|^-[A-Za-z]*i/
+/** A redirection that WRITES its target (`>`, `>>`, `2>`, `&>`). Not `>&2`, not `<`. */
+const WRITE_REDIRECT = /^(?:[0-9]+)?(?:&>>?|>>?)$/
 
 /**
  * `fs.write.outside` covers the whole write family — the DSH-native `write` and
@@ -451,6 +467,57 @@ function ambiguousVerdict(seg: Segment, command: string): Verdict | undefined {
 const ALLOW = (target: string): Verdict => ({ ruleId: '', tier: 'allow', target })
 
 /**
+ * Every spelling of the guard's own paths: the absolute forms from config plus
+ * their `~`/`$HOME`/`${HOME}` forms (`pathSpellings`). A command can reach a
+ * guarded file through any of them, and the previous absolute-only test missed
+ * exactly that.
+ */
+function guardPathMatchers(guardPaths: string[]): string[] {
+  const out = new Set<string>()
+  for (const p of guardPaths) {
+    if (typeof p !== 'string' || p === '') continue
+    for (const s of pathSpellings(p)) out.add(s)
+  }
+  return [...out]
+}
+
+/**
+ * True when this parsed segment EDITS one of the guard's own paths.
+ *
+ * The deny tier is scoped to edits, not mentions: a raw-text match refused every
+ * read (`tail -n 5 <journal>`, `cat <profile package.json>`) even though the
+ * guard's own deny text tells the agent to "see the guard journal". Two mutation
+ * shapes count:
+ *
+ * - a mutating verb ({@link MUTATION_VERBS}) — or an in-place editor
+ *   ({@link IN_PLACE_EDITORS} with {@link IN_PLACE_FLAG}) — whose segment names
+ *   a guard path;
+ * - a redirection ({@link WRITE_REDIRECT}) whose TARGET is a guard path.
+ *
+ * Both read the segment's `argv`, where quotes are already gone and their
+ * content kept, so a quoted path cannot hide a mutation — and where a quoted
+ * MENTION (`git commit -m "rm -f <journal>"`) stays a single data token, so it
+ * cannot fake one. The redirect pair is read from `argv` for the same reason: a
+ * `>` inside a quoted message is not a redirection token.
+ *
+ * A recorded trade-off: an interpreter inline program (`python -c "open(p,'w')"`)
+ * is NOT a mutation here. The guard does not interpret the program's language,
+ * and the shape is lexically indistinguishable from the `node -e "… mention …"`
+ * allow case. The deny tier therefore covers the mutation shapes the parser can
+ * prove; see the module's `rawSurface` note for the same choice on shape rules.
+ */
+function mutatesGuardPath(seg: Segment, guardSpellings: string[]): boolean {
+  const names = (text: string) => guardSpellings.some((p) => text.includes(p))
+  const verb = baseName(seg.verb)
+  const namesPath = seg.argv.some(names)
+  if (namesPath && verb !== undefined && MUTATION_VERBS.has(verb)) return true
+  if (namesPath && verb !== undefined && IN_PLACE_EDITORS.has(verb) && seg.flags.some((f) => IN_PLACE_FLAG.test(f))) {
+    return true
+  }
+  return seg.argv.some((word, i) => WRITE_REDIRECT.test(word) && i + 1 < seg.argv.length && names(seg.argv[i + 1]))
+}
+
+/**
  * The `secret.access` decision for ONE parsed segment. Two tables decide it, and
  * both read the segment's own verb:
  *
@@ -491,28 +558,29 @@ function isAccess(seg: Segment, protectedPaths: string[]): boolean {
  * content — a document that *discusses* a protected path, or a write that happens
  * to contain secret-looking text, is not an access.
  *
- * `guard.tamper` is the deliberate exception on both counts. It is the only
- * deny rule and the spec treats deny as unappealable self-protection, so there
- * coverage beats precision (fail-closed): it scans the RAW command text, not
- * the stripped surface. Reading the stripped surface would let the cheapest
- * obfuscation (`python -c "open('<guard path>','w')"`, or a heredoc body that
- * rewrites the settings file) erase the evidence, because quoted spans and
- * heredoc bodies are exactly what stripping removes. The raw scan is confined
- * to the command text and the tool's path field — a non-shell tool's content is
- * still never scanned.
+ * `guard.tamper` is the deliberate exception on one count: it is the only deny
+ * rule and the spec treats deny as unappealable self-protection. It therefore
+ * judges the segment that EDITS a guard path, not only the resolved rule shapes
+ * — but it is still scoped to an edit (a mutating verb or a write redirection
+ * targeting a guard path), never to a bare mention. A read of the journal must
+ * fall through, because the guard's own deny text says "see the guard journal".
  */
 export function classify(ctx: ClassifyContext): Verdict {
   const { tool, args, cwd, settings } = ctx
   const command = extractCommandText(args)
   const path = extractPathField(args)
   const target = command ?? path ?? tool
-  const touchesGuardConfig = (text: string) => settings.guardPaths.some((p) => p && text.includes(p))
+  const guardSpellings = guardPathMatchers(settings.guardPaths)
+  const touchesGuardConfig = (text: string) => guardSpellings.some((p) => text.includes(p))
+  // Parsed once and shared: the tamper check and the rule loop judge the same
+  // segments, wrappers already removed.
+  const segs = command !== undefined ? unwrapSegments(parseCommand(command)) : []
 
-  // guard.tamper — highest priority, never approvable, RAW text (see above).
+  // guard.tamper — highest priority, never approvable, scoped to EDITS (above).
   if (WRITE_FILE_TOOLS.has(tool) && path && touchesGuardConfig(path)) {
     return { ruleId: 'guard.tamper', tier: 'deny', target, detail: { reason: 'guard configuration write' } }
   }
-  if (command && touchesGuardConfig(command)) {
+  if (segs.some((seg) => mutatesGuardPath(seg, guardSpellings))) {
     return { ruleId: 'guard.tamper', tier: 'deny', target, detail: { reason: 'guard configuration access' } }
   }
 
@@ -533,7 +601,6 @@ export function classify(ctx: ClassifyContext): Verdict {
     // regex over the raw text: the parser sees past value-taking global options
     // (`git -C <dir> push …`, `npm -w <name> publish`) and wrappers
     // (`bash -c …`), which is where the raw matchers lost them.
-    const segs = unwrapSegments(parseCommand(command))
     // secret.access is checked over every segment BEFORE the rule loop, so an
     // access verdict keeps outranking an ordinary rule match on the same
     // command (its historical precedence).

@@ -1,5 +1,5 @@
 import { homedir, tmpdir } from 'node:os'
-import { join, resolve, normalize } from 'node:path'
+import { dirname, join, resolve, normalize } from 'node:path'
 import { journalDir, journalPath } from './journal.js'
 
 /**
@@ -90,6 +90,44 @@ export function guardConfigPaths(dshHome?: string): string[] {
     journalPath(dshHome),
     join(journalDir(dshHome), 'legacy-pending.json'),
   ]
+}
+
+/**
+ * Every spelling a shell command can use for one absolute path: the path itself
+ * plus its `~`, `$HOME` and `${HOME}` forms. The home prefix is replaced by a
+ * marker only when the path actually carries one of the candidate homes, so an
+ * unrelated absolute path is returned unchanged.
+ *
+ * The candidates are the real `homedir()` and the parent of the resolved DSH
+ * home. Both are needed: in production they are the same directory (`~/.dsh`),
+ * while a caller that passes its own `dshHome` (tests, an unusual `$DSH_HOME`)
+ * still gets the spelling its own layout implies.
+ *
+ * This exists because the deny tier only knew the ABSOLUTE spelling and a
+ * command that reached the guard config through `~`/`$HOME` walked past it.
+ */
+export function pathSpellings(p: string, dshHome?: string): string[] {
+  if (!p) return []
+  const out = new Set<string>([p])
+  for (const base of new Set([homedir(), dirname(resolveHome(dshHome))])) {
+    if (!base || base === '/' || !p.startsWith(base + '/')) continue
+    const rest = p.slice(base.length + 1)
+    out.add('~/' + rest)
+    out.add('$HOME/' + rest)
+    out.add('${HOME}/' + rest)
+  }
+  return [...out]
+}
+
+/**
+ * The guard's own paths in every spelling a command may carry — the absolute
+ * form plus the `~`/`$HOME` forms — derived from {@link guardConfigPaths}, so a
+ * new guarded file is covered by every spelling at once.
+ */
+export function guardPathSpellings(dshHome?: string): string[] {
+  const out = new Set<string>()
+  for (const p of guardConfigPaths(dshHome)) for (const s of pathSpellings(p, dshHome)) out.add(s)
+  return [...out]
 }
 
 /**

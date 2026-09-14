@@ -195,26 +195,43 @@ describe('classify — fs.write.outside (whole write family, temp dir exempt)', 
   })
 })
 
-describe('classify — guard.tamper reads the raw command (fail-closed self-protection)', () => {
+describe('classify — guard.tamper is scoped to EDITS of the guard config', () => {
   // Assembled at runtime: no tool call ever carries the guard path contiguously.
   const guardPath = settings.guardPaths[0]
 
-  it('denies a quoted-program write to the guard config path', () => {
-    // The program sits inside double quotes, so the stripped access surface —
-    // the one the precision rules correctly use — erases it entirely. The
-    // tamper rule must therefore read the RAW command text, otherwise an
-    // obfuscated write to the guard's own config classifies as allow.
-    const quotedProgram = `python -c "open('${guardPath}','w')"`
-    const v = call(quotedProgram)
-    expect(v).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
-    expect(v.detail?.reason).toBe('guard configuration access')
+  it('denies a mutating verb whose segment names the guard config path', () => {
+    // The stripped access surface — the one the precision rules correctly use —
+    // would erase a quoted path, and the raw surface is what a mutation is read
+    // from. Either way the verb that edits the file decides.
+    for (const command of [`cp /tmp/x ${guardPath}`, `rm -f ${guardPath}`, `sed -i s/x/y/ ${guardPath}`]) {
+      const v = call(command)
+      expect(v, command).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
+      expect(v.detail?.reason, command).toBe('guard configuration access')
+    }
   })
 
-  it('denies a heredoc body that rewrites the guard config path', () => {
-    // A heredoc body is stripped as data for the precision rules; for the
-    // guard's own config the raw text still has to deny.
+  it('denies a redirection whose target is the guard config path', () => {
+    // A raw-text mention is not enough (a READ must fall through) — the
+    // redirection's TARGET is what makes this an edit.
     const heredoc = ['cat > ' + join(tmpdir(), 'out.txt') + ' <<EOF', 'target=' + guardPath, 'EOF'].join('\n')
-    expect(call(heredoc)).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
+    expect(call(`printf x > ${guardPath}`)).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
+    // The path inside a heredoc BODY is data: it is not the redirection target
+    // (the target here is the temp file), so this is not an edit of the guard.
+    expect(call(heredoc).tier).toBe('allow')
+  })
+
+  it('does not deny reading the guard config path (the deny text says "see the guard journal")', () => {
+    for (const command of [`cat ${guardPath}`, `tail -n 5 ${guardPath}`, `grep -n rules ${guardPath}`]) {
+      expect(call(command).tier, command).toBe('allow')
+    }
+  })
+
+  it('records the scoped trade-off: an interpreter inline program is not a mutation', () => {
+    // `python -c "open('<path>','w')"` writes, but the guard does not interpret
+    // the program's language, and the shape is lexically indistinguishable from
+    // a mention. The scope of §5.4/§5.6 covers a mutating verb or a redirection
+    // target; this stays a recorded `allow` rather than an unnoticed one.
+    expect(call(`python -c "open('${guardPath}','w')"`).tier).toBe('allow')
   })
 
   it('denies a write-family tool whose path field is the guard config path', () => {

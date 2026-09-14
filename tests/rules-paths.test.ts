@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { join, relative } from 'node:path'
 import { classify } from '../src/host/rules.js'
 import { defaultProtectedPaths, guardConfigPaths } from '../src/host/paths.js'
+import { journalPath } from '../src/host/journal.js'
 
 /**
  * Task B4 — the path rules through `classify`, with every value under test
@@ -152,5 +153,107 @@ describe('guard.tamper protects the journal and the mounting manifest', () => {
     expect(journalFile).not.toBe('')
     expect(legacyTicket).not.toBe('')
     expect(mountManifest).not.toBe('')
+  })
+})
+
+/**
+ * PRECISION follow-up (the scoped re-review's I4 over-block) — the deny tier is
+ * scoped to EDITS (spec §5.4/§5.6: "a segment that edits the guard's own
+ * settings/config or truncates/removes the journal"). The raw-text mention test
+ * refused every read, so `tail -n 5 <journal>` denied while the guard's own deny
+ * text tells the agent to "see the guard journal". Reads fall through to the
+ * ordinary rules now; a mutating verb or a redirection whose TARGET is a guard
+ * path still denies.
+ */
+describe('guard.tamper is scoped to edits, never to mentions', () => {
+  const journalFile = settings.guardPaths.find((p) => p.endsWith('journal.jsonl')) ?? ''
+  const legacyTicket = settings.guardPaths.find((p) => p.endsWith('legacy-pending.json')) ?? ''
+  const mountManifest = settings.guardPaths.find((p) => p.endsWith('package.json')) ?? ''
+
+  it('no longer denies a read of the journal the deny text points at', () => {
+    for (const command of [`tail -n 5 ${journalFile}`, `cat ${journalFile}`, `head -n 5 ${journalFile}`, `grep -c denied ${journalFile}`]) {
+      expect(run('bash', { command }), command).toMatchObject({ tier: 'allow' })
+    }
+  })
+
+  it('no longer denies reading the profile manifest that mounts the guard', () => {
+    expect(run('bash', { command: `cat ${mountManifest}` }).tier).toBe('allow')
+  })
+
+  it('still denies a redirection whose TARGET is a guard path', () => {
+    for (const command of [`> ${journalFile}`, `2> ${journalFile}`, `printf x >> ${journalFile}`]) {
+      expect(run('bash', { command }), command).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
+    }
+  })
+
+  it('still denies every mutating verb on a guard path', () => {
+    for (const command of [
+      `rm -f ${journalFile}`,
+      `truncate -s 0 ${journalFile}`,
+      `shred -u ${journalFile}`,
+      `mv ${journalFile} /tmp/x`,
+      `sed -i s/x/y/ ${journalFile}`,
+    ]) {
+      expect(run('bash', { command }), command).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
+    }
+  })
+
+  it('still denies removing the retired legacy ticket file', () => {
+    for (const command of [`rm -f ${legacyTicket}`, `rm ${legacyTicket}`]) {
+      expect(run('bash', { command }), command).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
+    }
+  })
+
+  it('denies a write-family tool targeting the profile package.json that mounts the guard', () => {
+    expect(run('write', { file_path: mountManifest, content: '{}' })).toMatchObject({
+      ruleId: 'guard.tamper',
+      tier: 'deny',
+    })
+  })
+
+  it('keeps a mention of a guard path inside command DATA (a commit message) an allow', () => {
+    expect(run('bash', { command: `git commit -m "rm -f ${journalFile}"` }).tier).toBe('allow')
+  })
+})
+
+/**
+ * Item 5 of the precision follow-up — the raw-text tamper match only knew the
+ * ABSOLUTE spelling, so a command that reached the guard config through `~` or
+ * `$HOME` walked past it. Every spelling is derived from the same factories that
+ * produce the absolute paths (`guardConfigPaths` / `journalPath`), never written
+ * as a literal.
+ */
+describe('guard.tamper recognizes the ~ / $HOME spellings of a guard path', () => {
+  // An explicit DSH home under the REAL user home, so the `~` spelling is
+  // derivable on any machine (never a hard-coded /home/u fixture).
+  const dshHome = join(homedir(), '.dsh')
+  const realSettings = {
+    protectedBranches: ['master'],
+    protectedPaths: defaultProtectedPaths(dshHome),
+    guardPaths: guardConfigPaths(dshHome),
+  }
+  const runReal = (tool: string, args: unknown) =>
+    classify({ tool, args, cwd: '/repo', settings: realSettings })
+  const journalRel = relative(homedir(), journalPath(dshHome))
+  const markers = (rel: string) => [`~/${rel}`, '$HOME/' + rel, '$' + '{HOME}/' + rel]
+
+  it('denies a mutation spelled with ~ / $HOME / ${HOME}', () => {
+    for (const spelling of markers(journalRel)) {
+      for (const command of [`rm -f ${spelling}`, `> ${spelling}`]) {
+        expect(runReal('bash', { command }), command).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
+      }
+    }
+  })
+
+  it('denies a write tool whose path field carries the ~ spelling', () => {
+    const settingsSpelling = markers(relative(homedir(), guardConfigPaths(dshHome)[0]))[0]
+    expect(runReal('write', { file_path: settingsSpelling, content: '{}' })).toMatchObject({
+      ruleId: 'guard.tamper',
+      tier: 'deny',
+    })
+  })
+
+  it('still lets a read of the same ~ spelling fall through', () => {
+    expect(runReal('bash', { command: `tail -n 5 ~/${journalRel}` }).tier).toBe('allow')
   })
 })
