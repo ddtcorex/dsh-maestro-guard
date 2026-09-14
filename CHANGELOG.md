@@ -139,6 +139,27 @@ All notable changes to this project are documented in this file. Format follows
   position, so `rg rm <journal>`, `echo rm -f <journal>`, `timeout 5 cat <journal>` and
   `find . -exec cat <journal> +` all stay `allow`. `touch` on a guard path also stays an allow —
   it destroys no content, and an empty config loads as the built-in defaults.
+- Precision pass on that fix wave, after the scoped re-review measured two false-deny classes it
+  had introduced on the unappealable tier, plus the family gap it had left open:
+  - the descendant scan now applies to exactly the parser's "runs a trailing command" class
+    (`EXEC_WRAPPERS` ∪ `OPAQUE_VERBS`) and to the tokens after a `find` action flag, instead of
+    every token of every non-mention segment. `less -p rm <journal>`, `ag rm <journal>`,
+    `git commit -m rm <journal>`, `tar -cf x.tar rm <journal>`, `docker rm <journal>` and
+    `gcc -c "rm -f <journal>"` are no longer denied — the first two are the reads the same release
+    promises fall through;
+  - the cross-segment borrow requires a real pipe (`echo <journal> | xargs rm -f`), so
+    `tail <journal> && xargs rm -rf /tmp/junk` is no longer denied, and an `xargs -I{}` whose
+    placeholder never appears (`echo <journal> | xargs -I{} rm -rf /tmp/junk`) does not consume the
+    pipe at all;
+  - the mutating-verb family gained the transfers and in-place writers that destroy or replace the
+    file they name: `rsync`, `scp`, `curl`, `wget`, `patch`, `sponge`, `unlink`, `rmdir`, `ed`,
+    `vi`, `vim`, `nano`;
+  - the remaining limits are recorded in README and AGENTS.md rather than left implied: an
+    interpreter inline program is data, an unknown runner around a mutating verb
+    (`my-custom-runner rm -f <journal>`) is not read because nothing distinguishes it from a tool
+    whose argument spells `rm`, and a `-c` script chain deeper than two is not read;
+  - 13 path rows joined the golden corpus, including two over-blocks this pass fixed and the
+    depth/touch rulings, so the boundary is pinned in both directions.
 
 ### Removed
 - `pending.json` ticket store, the approve/list tools and the unused approval store. A legacy
