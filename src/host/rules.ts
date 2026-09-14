@@ -6,7 +6,6 @@ import {
   extractPathField,
   getCommandWorkingDir,
   stripQuoted,
-  stripHeredocs,
   EXEC_WRAPPERS,
   OPAQUE_VERBS,
   type Segment,
@@ -452,24 +451,45 @@ function ambiguousVerdict(seg: Segment, command: string): Verdict | undefined {
 const ALLOW = (target: string): Verdict => ({ ruleId: '', tier: 'allow', target })
 
 /**
- * The executed command with quoted spans and heredoc bodies removed.
- * Access detection must run on this surface only: text quoted or piped into a
- * program as data is a mention, not an access. Reuses the single
- * `stripQuoted`/`stripHeredocs` implementations from `parse.ts` so the guard
- * has exactly one definition of "what the command actually executes".
+ * The `secret.access` decision for ONE parsed segment. Two tables decide it, and
+ * both read the segment's own verb:
+ *
+ * - a MENTION verb (`grep`, `ls`, `printf`, `find`, …) only scans or prints its
+ *   arguments, so a protected path in its argv is a mention, never an access;
+ * - otherwise the segment's argv must hold BOTH an access verb and a protected
+ *   path.
+ *
+ * The surface is `seg.argv`, never `stripQuoted(command)`. That text-based
+ * surface was the 0.2.3 fail-open: it erased a QUOTED protected path before the
+ * rule looked, so `cat <path>` asked while `cat "<path>"`, `cp "<path>" /tmp/x`,
+ * `curl -T "<path>" …` and `cp /tmp/x "<path>"` were all allowed. The tokenizer
+ * already removed the quotes and kept their content, so quoting cannot hide an
+ * access from argv.
+ *
+ * A segment the parser could not resolve (`seg.ambiguous`: an interpreter inline
+ * program, an unknown wrapper, an expansion) cannot be proven to be a mention,
+ * so a protected path in its argv is an access on its own. That is the intended
+ * fail-closed trade-off — `python3 -c "… '<path>' …"` asks again.
+ *
+ * `seg.heredoc` is never read: a heredoc body is data, not argv, so a body that
+ * merely names a protected path stays quiet.
  */
-function accessSurface(command: string): string {
-  return stripHeredocs(stripQuoted(command))
+function isAccess(seg: Segment, protectedPaths: string[]): boolean {
+  const verb = baseName(seg.verb)
+  if (verb !== undefined && MENTION_VERBS.test(verb)) return false
+  const argvSurface = seg.argv.join(' ')
+  if (!isBlockedPath(argvSurface, protectedPaths)) return false
+  return seg.ambiguous || ACCESS_VERBS.test(argvSurface)
 }
 
 /**
  * Classify one tool call into a rule id + default tier.
  *
- * Precision rule: only a real ACCESS is gated. A shell command is judged on the
- * command surface (quotes/heredocs stripped, mention-only verbs skipped); a
- * non-shell tool is judged on the path it targets, never on its content — a
- * document that *discusses* a protected path, or a write that happens to
- * contain secret-looking text, is not an access.
+ * Precision rule: only a real ACCESS is gated. A shell command is judged on its
+ * parsed segments' argv (a mention-only verb is never an access, and a heredoc
+ * body is data); a non-shell tool is judged on the path it targets, never on its
+ * content — a document that *discusses* a protected path, or a write that happens
+ * to contain secret-looking text, is not an access.
  *
  * `guard.tamper` is the deliberate exception on both counts. It is the only
  * deny rule and the spec treats deny as unappealable self-protection, so there
@@ -486,7 +506,6 @@ export function classify(ctx: ClassifyContext): Verdict {
   const command = extractCommandText(args)
   const path = extractPathField(args)
   const target = command ?? path ?? tool
-  const surface = command ? accessSurface(command) : (path ?? '')
   const touchesGuardConfig = (text: string) => settings.guardPaths.some((p) => p && text.includes(p))
 
   // guard.tamper — highest priority, never approvable, RAW text (see above).
@@ -510,22 +529,19 @@ export function classify(ctx: ClassifyContext): Verdict {
   }
 
   if (command) {
-    // secret.access on the executing command surface. This is a PATH rule: the
-    // primitives it reads live in `paths.ts` (`isBlockedPath` and the
-    // containment/exemption helpers), while the mention-vs-access verb tables
-    // below stay here with the rest of the rule layer.
-    const segments = surface.split(/\s*(?:&&|\|\||;|\n)+\s*/)
-    for (const seg of segments) {
-      if (MENTION_VERBS.test(seg)) continue
-      if (isBlockedPath(seg, settings.protectedPaths) && ACCESS_VERBS.test(seg)) {
-        return { ruleId: 'secret.access', tier: 'ask', target: command }
-      }
-    }
     // Protected operations are resolved from parsed segments, never from a
     // regex over the raw text: the parser sees past value-taking global options
     // (`git -C <dir> push …`, `npm -w <name> publish`) and wrappers
     // (`bash -c …`), which is where the raw matchers lost them.
     const segs = unwrapSegments(parseCommand(command))
+    // secret.access is checked over every segment BEFORE the rule loop, so an
+    // access verdict keeps outranking an ordinary rule match on the same
+    // command (its historical precedence).
+    for (const seg of segs) {
+      if (isAccess(seg, settings.protectedPaths)) {
+        return { ruleId: 'secret.access', tier: 'ask', target: command }
+      }
+    }
     for (let i = 0; i < segs.length; i++) {
       const seg = segs[i]
       // Ambiguity escalates first: a segment the parser could not resolve is
