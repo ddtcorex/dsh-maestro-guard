@@ -71,7 +71,7 @@ Host-only: no `build:client` step, no client bundle.
 ## Conventions
 
 - **Host-only** — this package has no client half. Any future browser UI belongs to a separate client package or an existing one.
-- **Rule ids are the contract** — config overrides, journal entries and approval reasons all key on `RULE_IDS`; never rename one casually. New protection means a new rule id plus a `DEFAULT_TIERS` entry.
+- **Rule ids are the contract** — config overrides, journal entries and approval reasons all key on `RULE_IDS` (`git.push.protected`, `git.merge.protected`, `git.tag.release`, `git.push.force`, `gh.release.create`, `gh.protection.delete`, `pkg.publish`, `secret.access`, `fs.write.outside`, `net.exec.remote`, `guard.tamper`); never rename one casually. New protection means a new rule id plus a `DEFAULT_TIERS` entry.
 - **Redaction breadth** — extend the secret-family and prefix-keeping tables rather than adding a one-off regex. Redaction runs at the journal choke point (`Journal.append` redacts every string field), not at each call site, and the executed arguments are never rewritten; `containsSecret()` stays available where a caller needs a boolean check.
 - **Precision in the classifier** — judge a shell command on its stripped command surface (quotes and heredocs are data) and a non-shell tool on its path field, never on its content. `guard.tamper` is the deliberate raw-text exception.
 - **Permission semantics** — policy checks return a clear allow/deny; keep the check pure and unit-testable (no side effects).

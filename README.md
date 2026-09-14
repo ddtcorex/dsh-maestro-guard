@@ -22,9 +22,9 @@ parse → classify → decide → journal → act
    `guard.tamper`, which scans the **raw, unstripped** command text: tampering with the guard itself
    is judged on the whole command, not on the stripped surface.
 2. **classify** — map the call to a stable rule id (`git.push.protected`, `git.merge.protected`,
-   `git.tag.release`, `git.push.force`, `pkg.publish`, `secret.access`, `fs.write.outside`,
-   `net.exec.remote`, `guard.tamper`), resolving the branch of the repo the command targets
-   through its `cd` / `git -C`.
+   `git.tag.release`, `git.push.force`, `gh.release.create`, `gh.protection.delete`, `pkg.publish`,
+   `secret.access`, `fs.write.outside`, `net.exec.remote`, `guard.tamper`), resolving the branch of
+   the repo the command targets through its `cd` / `git -C`.
 3. **decide** — look the rule id up in `domains.guard.rules` to get one of the four tiers below.
 4. **journal** — append one redacted record per decision.
 5. **act** — run the call or return a deny decision.

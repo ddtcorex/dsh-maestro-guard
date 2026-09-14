@@ -1,8 +1,7 @@
 import type { Tier } from './tiers.js'
+import { parseCommand, unwrapSegments, type Segment } from './parse.js'
 import {
   isBlockedPath,
-  isBlockedCommand,
-  isBlockedGitCommand,
   isOutsideCwd,
   isRuntimeSpillPath,
   isWithinTempDir,
@@ -24,6 +23,8 @@ export const RULE_IDS = [
   'git.merge.protected',
   'git.tag.release',
   'git.push.force',
+  'gh.release.create',
+  'gh.protection.delete',
   'pkg.publish',
   'secret.access',
   'fs.write.outside',
@@ -37,6 +38,8 @@ export const DEFAULT_TIERS: Record<string, Tier> = {
   'git.merge.protected': 'journal',
   'git.tag.release': 'ask',
   'git.push.force': 'ask',
+  'gh.release.create': 'ask',
+  'gh.protection.delete': 'ask',
   'pkg.publish': 'ask',
   'secret.access': 'ask',
   'fs.write.outside': 'ask',
@@ -93,9 +96,268 @@ const WRITE_FILE_TOOLS = new Set(['write', 'edit', 'maestro_write_file', 'fs_wri
 const ACCESS_VERBS = /\b(cat|bat|head|tail|less|more|cp|scp|rsync|curl|wget|source|tee|dd|install|xxd|base64|openssl|gpg|tar|zip)\b/
 /** Verbs that only scan/print the argument itself — mentioning a path is not reading it. */
 const MENTION_VERBS = /^\s*(grep|egrep|fgrep|rg|sed|awk|echo|printf|find|ls|test|wc|sort|uniq|jq)\b/
-const REMOTE_EXEC = /\b(curl|wget)\b[^\n|]*\|\s*(sudo\s+)?(ba|z|da)?sh\b|\b(source|\.)\s*<\(\s*curl\b|\b(ba|z|da)?sh\s*<\(\s*curl\b/
-const FORCE_PUSH = /\bgit\s+push\b[^\n]*(--force(-with-lease)?\b|(^|\s)-f\b|\s\+[A-Za-z0-9._\/-]+:)/
-const RELEASE_TAG = /refs\/tags\/|\bgit\s+tag\b|(?:^|\s)v?\d+\.\d+\.\d+(?:[-+][0-9a-z.]+)?(?:\s|$)/
+
+/* ------------------------------------------------------------------ *
+ * Protected operations, resolved from parsed segments
+ * ------------------------------------------------------------------ */
+
+/** Package managers whose `publish` verb is gated. */
+const PACKAGE_MANAGERS = new Set(['pnpm', 'npm', 'yarn'])
+
+/**
+ * Package-manager verbs that run a named SCRIPT or package: `npm run publish`
+ * runs a script called `publish` and `yarn dlx publish` runs a package, so in
+ * neither is `publish` the verb that publishes THIS project.
+ */
+const SCRIPT_RUNNER_VERBS = new Set(['run', 'run-script', 'exec', 'dlx'])
+
+/** Shells whose `-c`/stdin argument the parser can read (see `parse.ts`'s SHELLS). */
+const SHELL_NAMES = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'ash', 'fish', 'csh', 'tcsh'])
+
+/** `source`/`.` execute the process substitution they are handed, like a shell does. */
+const SOURCE_VERBS = new Set(['source', '.'])
+
+/** `vX.Y.Z` / `X.Y.Z` plus an optional prerelease or build suffix — a release tag, not a branch. */
+const SEMVER_REF = /^v?\d+\.\d+\.\d+(?:[-+][0-9a-z.]+)?$/i
+
+/**
+ * Raw-text shapes for the ambiguity escalation. A segment the parser could not
+ * resolve (an exec-like wrapper, an expansion, an unknown option) is escalated
+ * only when its own raw text carries one of these — otherwise `ssh host ls`
+ * would prompt on every call. They are deliberately the same shapes the rule
+ * layer resolves from a parsed segment, applied to the text the parser refused
+ * to resolve.
+ */
+const RAW_GH_PR_MERGE = /\bgh\s+pr\s+merge\b/
+const RAW_GH_RELEASE = /\bgh\s+release\s+(?:create|publish)\b/i
+/** `gh api … DELETE …` — the protected branch it runs on is checked separately. */
+const RAW_GH_API_DELETE = /\bgh\s+api\b[\s\S]*\bdelete\b/i
+const RAW_PUBLISH = /\b(pnpm|npm|yarn)\b[^\n]*\bpublish\b/
+const RAW_GIT_PUSH = /\bgit\s+push\b/
+const RAW_RELEASE_TAG = /refs\/tags\/|(?:^|\s)v?\d+\.\d+\.\d+(?:[-+][0-9a-z.]+)?(?:\s|$)/
+const RAW_FORCE_PUSH = /(?:^|\s)(?:--force(?:-with-lease)?|-f)(?:=|\s|$)/
+const RAW_REMOTE_EXEC =
+  /\b(curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b|\b(source|\.)\s*<\(\s*(curl|wget)\b|\b(?:ba|z|da)?sh\s*<\(\s*(curl|wget)\b/
+
+/** The verb without its directory (`/bin/bash` → `bash`). */
+function baseName(verb: string | undefined): string | undefined {
+  if (verb === undefined) return undefined
+  const cut = verb.lastIndexOf('/')
+  return cut === -1 ? verb : verb.slice(cut + 1)
+}
+
+/** The shell a verb names, bare or by path (`/bin/bash` → `bash`). */
+function shellName(verb: string | undefined): string | undefined {
+  const base = baseName(verb)
+  return base !== undefined && SHELL_NAMES.has(base) ? base : undefined
+}
+
+/** Both sides of a refspec: `+refs/heads/x:refs/heads/y` → `['x', 'y']`. */
+function refNames(refspec: string): string[] {
+  return refspec
+    .replace(/^\+/, '')
+    .split(':')
+    .map((side) => side.replace(/^refs\/(?:heads|tags|remotes)\//, '').replace(/^refs\//, ''))
+    .filter((side) => side !== '')
+}
+
+/** True when any refspec this push names is one of the protected branches. */
+function namesProtectedBranch(seg: Segment, branches: string[]): boolean {
+  const wanted = new Set(branches.map((b) => b.toLowerCase()))
+  return seg.refspecs.some((r) => refNames(r).some((name) => wanted.has(name.toLowerCase())))
+}
+
+/** True for `refs/tags/*` and for a bare semver tag (`v1.2.3`, `1.2.3-rc.2`). */
+function isTagRefspec(refspec: string): boolean {
+  if (refspec.replace(/^\+/, '').split(':').some((side) => side.startsWith('refs/tags/'))) return true
+  return refNames(refspec).some((name) => SEMVER_REF.test(name))
+}
+
+/** `--force`, `--force-with-lease[=…]`, a `-f` (alone or in a short cluster), or a `+refspec`. */
+function isForcePush(seg: Segment): boolean {
+  if (seg.refspecs.some((r) => r.startsWith('+'))) return true
+  return seg.flags.some(
+    (f) => f === '--force' || f.startsWith('--force-with-lease') || (/^-[A-Za-z]+$/.test(f) && f.includes('f')),
+  )
+}
+
+/**
+ * `HEAD` (and `@`) alone name no target of their own: they push the branch the
+ * repository is checked out on, so they are resolved through `branchOf` rather
+ * than read as an explicit, safe refspec. `HEAD:feature/x` is explicit — its
+ * destination names the target.
+ */
+function isImplicitRefspec(refspec: string): boolean {
+  const bare = refspec.replace(/^\+/, '')
+  if (bare.includes(':')) return false
+  return bare === 'HEAD' || bare === '@'
+}
+
+/**
+ * `git push`, refspec-first (spec §5.4): an explicit refspec is the target, so a
+ * protected name or a release tag in it decides the verdict; only a push with
+ * nothing but the remote (or `HEAD`) falls back to the branch the target repo is
+ * checked out on. A branch that cannot be resolved is fail-closed: `cd "$D" &&
+ * git push origin HEAD` must ask because the branch cannot be proven safe.
+ */
+function classifyPush(seg: Segment, command: string, ctx: ClassifyContext, cwd?: string): Verdict | undefined {
+  const branches = ctx.settings.protectedBranches
+  if (namesProtectedBranch(seg, branches)) {
+    return { ruleId: 'git.push.protected', tier: 'ask', target: command }
+  }
+  if (seg.refspecs.some(isTagRefspec)) {
+    return { ruleId: 'git.tag.release', tier: 'ask', target: command }
+  }
+  // Flag targets, checked before the refspec reading: `--all`/`--mirror` push
+  // every local branch — including a protected one — and `--mirror` can also
+  // force-update or delete remote refs, while `--tags` means `refs/tags/*`.
+  // None of them carries a refspec, so the flag itself is the target and the
+  // branch fallback must never see them.
+  if (seg.flags.includes('--all') || seg.flags.includes('--mirror')) {
+    return { ruleId: 'git.push.protected', tier: 'ask', target: command }
+  }
+  if (seg.flags.includes('--tags')) {
+    return { ruleId: 'git.tag.release', tier: 'ask', target: command }
+  }
+  if (isForcePush(seg)) {
+    return { ruleId: 'git.push.force', tier: 'ask', target: command }
+  }
+  const explicit = seg.refspecs.slice(1).filter((r) => !isImplicitRefspec(r))
+  if (explicit.length > 0) return undefined
+  // The repo the push actually runs in: `cd <dir>` / `git -C <dir>` when the
+  // command names one, the session cwd otherwise — never an empty-dir sentinel.
+  const repo = getCommandWorkingDir(command, cwd)
+  const branch = repo === undefined ? undefined : ctx.branchOf?.(repo)
+  if (branch !== undefined && branches.some((b) => b.toLowerCase() === branch.toLowerCase())) {
+    return { ruleId: 'git.push.protected', tier: 'ask', target: command, repo, branch }
+  }
+  if (branch === undefined) {
+    // A repo that names a working directory the guard cannot read, or a branch
+    // `branchOf` cannot resolve, must not be treated as safe: ask.
+    return { ruleId: 'git.push.protected', tier: 'ask', target: command, repo }
+  }
+  return undefined
+}
+
+/** `gh pr merge` — parsed, not matched against the raw text. */
+function isGhPrMerge(seg: Segment): boolean {
+  if (baseName(seg.verb) !== 'gh') return false
+  return seg.argv.some((word, i) => word === 'pr' && seg.argv[i + 1] === 'merge')
+}
+
+/**
+ * A `gh` statement read from the segment that carries it. A RESOLVED segment
+ * must name `gh` as its verb, so a quoted mention inside a resolved
+ * `echo "gh release create v1"` stays data; a segment the parser could not
+ * resolve is judged on its raw text — the same fail-closed reading every other
+ * ambiguity escalation uses — because the command it really runs was never
+ * parsed. Neither shape needs parser support beyond the segment boundary.
+ */
+function namesGhStatement(seg: Segment, shape: RegExp): boolean {
+  if (!seg.ambiguous && baseName(seg.verb) !== 'gh') return false
+  return shape.test(seg.raw)
+}
+
+/**
+ * `gh api … delete … /branches/<protected>/protection` removes the gate the
+ * workspace relies on, so it asks. The branch set is the same one `git push`
+ * uses; the match is a plain lowercased substring so a branch name carrying
+ * regex characters cannot change the result.
+ */
+function deletesProtectedBranchProtection(seg: Segment, branches: string[]): boolean {
+  if (!namesGhStatement(seg, RAW_GH_API_DELETE)) return false
+  const lower = seg.raw.toLowerCase()
+  return branches.some((b) => {
+    const name = b.trim().toLowerCase()
+    return name !== '' && lower.includes(`/branches/${name}/protection`)
+  })
+}
+
+/**
+ * True when the segment is a `git push`. The resolved reading is the parser's
+ * subcommand; a segment the parser could not resolve still names `push` in its
+ * `argv`/`refspecs` (`git $GITS push origin master` — an expansion between the
+ * verb and the subcommand), and that shape is routed to the same push
+ * classifier rather than allowed.
+ */
+function isPushSegment(seg: Segment): boolean {
+  if (seg.subcommand === 'push') return true
+  return seg.ambiguous && (seg.argv.includes('push') || seg.refspecs.includes('push'))
+}
+
+/**
+ * A package-manager publish. The publish verb is looked up among the segment's
+ * non-flag words instead of `subcommand`, because an untabled value-taking short
+ * option occupies that slot (`npm -w <name> publish` reads `subcommand '<name>'`).
+ * Two shapes are excluded so the word `publish` alone is not enough:
+ *
+ * - a `publish` word sitting BEFORE the resolved subcommand is the value of a
+ *   value-taking option (`pnpm --filter publish test`), never the verb;
+ * - a `publish` word preceded by a script-runner verb (`npm run publish`,
+ *   `npm exec publish`, `yarn dlx publish`) names a script or package that
+ *   happens to be called `publish`.
+ */
+function classifyPublish(seg: Segment, command: string): Verdict | undefined {
+  const verb = baseName(seg.verb)
+  if (verb === undefined || !PACKAGE_MANAGERS.has(verb)) return undefined
+  const argv = seg.argv
+  const subIndex = seg.subcommand === undefined ? -1 : argv.indexOf(seg.subcommand, 1)
+  const isPublishVerb = argv.some((word, i) => {
+    if (i < 1 || word !== 'publish') return false
+    if (subIndex >= 0 && i < subIndex) return false
+    return !argv.slice(1, i).some((w) => SCRIPT_RUNNER_VERBS.has(w))
+  })
+  if (!isPublishVerb) return undefined
+  const dryRun = seg.flags.some(
+    (f) => f === '--dry-run' || f === '--dryRun' || f.startsWith('--dry-run=') || f.startsWith('--dryRun='),
+  )
+  return { ruleId: 'pkg.publish', tier: dryRun ? 'journal' : 'ask', target: command }
+}
+
+/** True when the token names the local `curl`/`wget` binary (a URL is not a fetcher). */
+function isNetworkFetcher(token: string): boolean {
+  if (token.includes('://')) return false
+  const base = baseName(token)
+  return base === 'curl' || base === 'wget'
+}
+
+/**
+ * `curl … | bash` / `wget … | sh` (the pipe token stays on the fetcher's own
+ * segment) and `source <(curl …)` / `bash <(curl …)` (the process substitution
+ * is one segment, so its `<` and `(curl` tokens are both visible).
+ */
+function isRemoteExecPair(segs: Segment[], i: number): boolean {
+  const seg = segs[i]
+  if (seg.argv.includes('|') && seg.argv.some(isNetworkFetcher)) {
+    const next = segs[i + 1]
+    if (next !== undefined && shellName(next.verb) !== undefined) return true
+  }
+  const consumer = baseName(seg.verb)
+  const shellConsumer = shellName(seg.verb) !== undefined || (consumer !== undefined && SOURCE_VERBS.has(consumer))
+  return (
+    shellConsumer &&
+    seg.argv.includes('<') &&
+    seg.argv.some((t) => t.startsWith('(curl') || t.startsWith('(wget'))
+  )
+}
+
+/**
+ * The verdict for a segment the parser could not resolve: `ask` for the rule its
+ * raw text names, `undefined` when it names none. This is the §5.3 escalation,
+ * scoped so that an unresolved wrapper around a harmless command stays quiet.
+ */
+function ambiguousVerdict(seg: Segment, command: string): Verdict | undefined {
+  const raw = seg.raw
+  if (RAW_GH_PR_MERGE.test(raw)) return { ruleId: 'git.merge.protected', tier: 'ask', target: command }
+  if (RAW_PUBLISH.test(raw)) return { ruleId: 'pkg.publish', tier: 'ask', target: command }
+  if (RAW_GIT_PUSH.test(raw)) {
+    if (RAW_RELEASE_TAG.test(raw)) return { ruleId: 'git.tag.release', tier: 'ask', target: command }
+    if (RAW_FORCE_PUSH.test(raw)) return { ruleId: 'git.push.force', tier: 'ask', target: command }
+    return { ruleId: 'git.push.protected', tier: 'ask', target: command }
+  }
+  if (RAW_REMOTE_EXEC.test(raw)) return { ruleId: 'net.exec.remote', tier: 'ask', target: command }
+  return undefined
+}
 
 const ALLOW = (target: string): Verdict => ({ ruleId: '', tier: 'allow', target })
 
@@ -157,6 +419,9 @@ export function classify(ctx: ClassifyContext): Verdict {
   }
 
   if (command) {
+    // secret.access on the executing command surface. This is a PATH rule and
+    // keeps its access-vs-mention matchers; B4 moves the path primitives into
+    // `paths.ts` and owns re-pointing them.
     const segments = surface.split(/\s*(?:&&|\|\||;|\n)+\s*/)
     for (const seg of segments) {
       if (MENTION_VERBS.test(seg)) continue
@@ -164,17 +429,40 @@ export function classify(ctx: ClassifyContext): Verdict {
         return { ruleId: 'secret.access', tier: 'ask', target: command }
       }
     }
-    if (REMOTE_EXEC.test(surface)) return { ruleId: 'net.exec.remote', tier: 'ask', target: command }
-    if (FORCE_PUSH.test(surface)) return { ruleId: 'git.push.force', tier: 'ask', target: command }
-    if (/\bgit\s+push\b/.test(surface) && RELEASE_TAG.test(surface)) {
-      return { ruleId: 'git.tag.release', tier: 'ask', target: command }
-    }
-    if (/\bgh\s+pr\s+merge\b/.test(surface)) return { ruleId: 'git.merge.protected', tier: 'journal', target: command }
-    if (isBlockedCommand(command)) return { ruleId: 'pkg.publish', tier: 'ask', target: command }
-    const repo = getCommandWorkingDir(command, cwd)
-    const branch = ctx.branchOf?.(repo ?? '')
-    if (isBlockedGitCommand(command, branch, settings.protectedBranches)) {
-      return { ruleId: 'git.push.protected', tier: 'ask', target: command, repo, branch }
+    // Protected operations are resolved from parsed segments, never from a
+    // regex over the raw text: the parser sees past value-taking global options
+    // (`git -C <dir> push …`, `npm -w <name> publish`) and wrappers
+    // (`bash -c …`), which is where the raw matchers lost them.
+    const segs = unwrapSegments(parseCommand(command))
+    for (let i = 0; i < segs.length; i++) {
+      const seg = segs[i]
+      // Ambiguity escalates first: a segment the parser could not resolve is
+      // asked about whenever its own raw text names a verb the rules resolve.
+      if (seg.ambiguous) {
+        const escalated = ambiguousVerdict(seg, command)
+        if (escalated) return escalated
+      }
+      if (isRemoteExecPair(segs, i)) {
+        return { ruleId: 'net.exec.remote', tier: 'ask', target: command }
+      }
+      if (isGhPrMerge(seg)) {
+        return { ruleId: 'git.merge.protected', tier: 'journal', target: command }
+      }
+      if (namesGhStatement(seg, RAW_GH_RELEASE)) {
+        return { ruleId: 'gh.release.create', tier: 'ask', target: command }
+      }
+      if (deletesProtectedBranchProtection(seg, settings.protectedBranches)) {
+        return { ruleId: 'gh.protection.delete', tier: 'ask', target: command }
+      }
+      if (baseName(seg.verb) === 'git' && isPushSegment(seg)) {
+        const push = classifyPush(seg, command, ctx, cwd)
+        if (push) return push
+        // An ambiguous segment cannot be proven to push a safe refspec, so it
+        // is answered like an unprovable branch: ask, never allow.
+        if (seg.ambiguous) return { ruleId: 'git.push.protected', tier: 'ask', target: command }
+      }
+      const publish = classifyPublish(seg, command)
+      if (publish) return publish
     }
   }
 
