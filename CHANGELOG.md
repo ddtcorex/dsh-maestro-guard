@@ -157,9 +157,27 @@ All notable changes to this project are documented in this file. Format follows
   - the remaining limits are recorded in README and AGENTS.md rather than left implied: an
     interpreter inline program is data, an unknown runner around a mutating verb
     (`my-custom-runner rm -f <journal>`) is not read because nothing distinguishes it from a tool
-    whose argument spells `rm`, and a `-c` script chain deeper than two is not read;
+    whose argument spells `rm`, and a `-c` script chain is read two levels deep (a third level is
+    not read);
   - 13 path rows joined the golden corpus, including two over-blocks this pass fixed and the
     depth/touch rulings, so the boundary is pinned in both directions.
+- Second precision pass on the same deny tier, after the next scoped verification measured one
+  reopened fail-open and one new fail-closed class:
+  - the pipeline borrow looked only at the IMMEDIATELY preceding segment, so any pass-through
+    command between the path and the deleting verb reopened the shape: `cat <journal> | grep x |
+    xargs rm -f`, `… | tee /tmp/x | xargs rm -f` and `… | sort | xargs rm -f` were allows again. It
+    now walks the whole pipe chain and stops at any other operator;
+  - the dual-use verbs are judged on their WRITE SHAPE instead of their name, because a bare
+    membership turned every READ of them into an unappealable deny: `curl -I <journal>`,
+    `curl -s <journal>`, `curl -d @<journal> <url>`, `wget -q -O - <journal>`,
+    `rsync --list-only <journal> /tmp/`, `rsync <journal> /tmp/x`, `scp -r host:<journal> /tmp/`,
+    `vi -R`, `vim -M` and `nano -v` all fall through now, while `curl -o`,
+    `curl --output=`, `wget -O`, `wget --output-document=`, a `rsync`/`scp` DESTINATION
+    (including with flags after it) and an editor without its read-only switch still deny.
+    `ed` stays an unconditional writer because GNU ed has no read-only mode;
+  - `ignoresPipedInput`'s conservatism (the placeholder's position is not tracked) is documented,
+    the pipe-chain and per-wrapper boundaries are pinned by tests, and the README's `find`-flag
+    sentence no longer implies that every action flag asks regardless of what it runs.
 
 ### Removed
 - `pending.json` ticket store, the approve/list tools and the unused approval store. A legacy
