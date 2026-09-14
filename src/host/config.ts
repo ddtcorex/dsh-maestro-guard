@@ -7,9 +7,9 @@ import type { Tier } from './tiers.js'
  * on this object: `classify` produces a rule id, `decide` maps it through
  * `rules`, and the settings lists feed the classifier's path/branch checks.
  *
- * Task B5 adds `mapLegacyConfig()` (the legacy `gitProtection` / `publishBlocked`
- * / `cwdContainment` / `credentialPaths` keys) and its tests; Task A4 only
- * needs the defaults plus a live read of the new keys.
+ * {@link mapLegacyConfig} carries a document written for schema v1 (the
+ * `gitProtection` / `publishBlocked` / `cwdContainment` / `credentialPaths`
+ * booleans) forward; {@link mergeGuardConfig} reads a v2 document.
  */
 export interface GuardConfigV2 {
   rules: Record<string, Tier>
@@ -78,22 +78,133 @@ export function mergeGuardConfig(raw: unknown): GuardConfigV2 {
 }
 
 /**
- * Read `domains.guard` from the shared Maestro settings store. A missing store,
- * an absent domain or an unreadable file all yield {@link DEFAULT_CONFIG}: the
- * guard's own protection may degrade in precision, never in coverage.
+ * The legacy keys schema v2 replaced, and the rules each one used to gate.
+ * `gitProtection.enabled: false` switched the whole git family off, so all
+ * three git rules become `journal` (still recorded, never prompted).
  */
-export async function loadGuardConfig(): Promise<GuardConfigV2> {
+const LEGACY_GIT_RULES = ['git.push.protected', 'git.tag.release', 'git.push.force'] as const
+
+/** The four keys schema v2 replaced. They are stripped before the v2 merge. */
+const LEGACY_KEYS = new Set(['gitProtection', 'publishBlocked', 'cwdContainment', 'credentialPaths'])
+
+/**
+ * Translate a persisted `domains.guard` object that still carries the legacy
+ * `gitProtection` / `publishBlocked` / `cwdContainment` / `credentialPaths`
+ * keys onto schema v2.
+ *
+ * The legacy translation is applied FIRST and the remaining v2 document is
+ * merged on top of it: the legacy booleans are the older reading of the
+ * document, so an explicit v2 `rules` entry must win over the boolean that
+ * translated onto the same rule id. Nothing is mutated: the arrays, the rule
+ * table and the nested objects are fresh copies, which matters because
+ * `DEFAULT_CONFIG` is a module-level object shared by every caller.
+ *
+ * `migratedKeys` names the legacy keys that were actually read (a key that is
+ * absent, or a `gitProtection` that carries no setting at all, is not
+ * reported; `publishBlocked: true` / `cwdContainment: true` / an empty
+ * `credentialPaths` changed nothing and stay out). `apply()` journals one
+ * `config-legacy` note per boot from this list, so an operator can see why the
+ * gate changed instead of discovering it from a silent behaviour shift.
+ */
+export function mapLegacyConfig(raw: unknown): { config: GuardConfigV2; migratedKeys: string[] } {
+  if (!isPlainObject(raw)) return { config: mergeGuardConfig(undefined), migratedKeys: [] }
+  const migratedKeys: string[] = []
+
+  // Stage 1 — translate the legacy keys onto the v2 shape.
+  const legacyRules: Record<string, Tier> = {}
+  let legacyBranches: string[] | undefined
+  let legacyCredentialPaths: string[] | undefined
+
+  const gitProtection = raw.gitProtection
+  if (isPlainObject(gitProtection) && Object.keys(gitProtection).length > 0) {
+    migratedKeys.push('gitProtection')
+    if (gitProtection.enabled === false) {
+      for (const rule of LEGACY_GIT_RULES) legacyRules[rule] = 'journal'
+    }
+    legacyBranches = stringArray(gitProtection.branches)
+  }
+
+  if (raw.publishBlocked === false) {
+    migratedKeys.push('publishBlocked')
+    legacyRules['pkg.publish'] = 'journal'
+  }
+
+  if (raw.cwdContainment === false) {
+    migratedKeys.push('cwdContainment')
+    legacyRules['fs.write.outside'] = 'journal'
+  }
+
+  const credentialPaths = stringArray(raw.credentialPaths)
+  if (credentialPaths) {
+    migratedKeys.push('credentialPaths')
+    legacyCredentialPaths = credentialPaths
+  }
+
+  // Stage 2 — the v2 document wins key by key; `rules` merges per rule id so an
+  // explicit v2 tier beats the legacy boolean that produced the same id.
+  const v2: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(raw)) {
+    if (!LEGACY_KEYS.has(key)) v2[key] = value
+  }
+  const v2Rules = isPlainObject(v2.rules) ? v2.rules : {}
+  const config = mergeGuardConfig({
+    ...v2,
+    rules: { ...legacyRules, ...v2Rules },
+    protectedBranches: stringArray(v2.protectedBranches) ?? legacyBranches,
+  })
+
+  // The legacy credential paths are an ADDITION to whatever protected the
+  // document, never a replacement: narrowing coverage is exactly the failure
+  // this migration exists to prevent.
+  if (legacyCredentialPaths) {
+    config.protectedPaths = [...new Set([...config.protectedPaths, ...legacyCredentialPaths])]
+  }
+
+  return { config, migratedKeys }
+}
+
+/**
+ * Read the raw `domains.guard` value from the shared Maestro settings store. A
+ * missing store, an absent domain or an unreadable file all yield `undefined`:
+ * the caller falls back to the built-in defaults, so the guard's own
+ * protection may degrade in precision, never in coverage.
+ */
+async function readGuardDomain(dshHome?: string): Promise<unknown> {
   try {
     const mod: any = await import('@ddtcorex/dsh-maestro-config-lib')
+    const opts = dshHome === undefined ? undefined : { dshHome }
     if (typeof mod.load === 'function') {
-      const doc = await mod.load()
-      return mergeGuardConfig(doc?.domains?.guard)
+      const doc = await mod.load(opts)
+      return doc?.domains?.guard
     }
     if (typeof mod.get === 'function') {
-      return mergeGuardConfig(await mod.get('guard'))
+      return await mod.get('guard', opts)
     }
   } catch (e) {
     console.error('[dsh-maestro-guard] guard config read failed, using defaults:', (e as Error)?.message)
   }
-  return mergeGuardConfig(undefined)
+  return undefined
+}
+
+/**
+ * The migrating read: run the persisted `domains.guard` through
+ * {@link mapLegacyConfig} and report which legacy keys were translated, so
+ * `apply()` can journal one `config-legacy` note per boot.
+ *
+ * `mapLegacyConfig` is pure and this is the only place a v1 document is
+ * translated at runtime — before this existed, `loadGuardConfig` called
+ * `mergeGuardConfig` directly and a persisted v1 document silently lost its
+ * `credentialPaths` and custom branch list.
+ */
+export async function loadGuardConfigWithMigration(dshHome?: string): Promise<{ config: GuardConfigV2; migratedKeys: string[] }> {
+  return mapLegacyConfig(await readGuardDomain(dshHome))
+}
+
+/**
+ * The per-call read the guard handler performs on every tool call: a thin
+ * wrapper over {@link loadGuardConfigWithMigration} that returns only the
+ * config. No journaling happens here — that is a once-per-boot concern.
+ */
+export async function loadGuardConfig(dshHome?: string): Promise<GuardConfigV2> {
+  return (await loadGuardConfigWithMigration(dshHome)).config
 }

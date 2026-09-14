@@ -5,7 +5,7 @@ import { Journal, type AskOutcome } from './journal.js'
 import { redact } from './redact.js'
 import { classify } from './rules.js'
 import { decide, renderReason } from './decide.js'
-import { DEFAULT_CONFIG, loadGuardConfig, type GuardConfigV2 } from './config.js'
+import { DEFAULT_CONFIG, loadGuardConfig, loadGuardConfigWithMigration, type GuardConfigV2 } from './config.js'
 import { retireLegacyStore } from './migrate.js'
 import { apply as applyFullScan } from './full-scan-tool.js'
 import type { GuardToolExecution, GuardPreToolDecision } from './augment.js'
@@ -104,6 +104,36 @@ interface NativeApproval {
   request(req: { agent: unknown; toolName: string; callId?: string; reason: string; signal?: AbortSignal }): Promise<string>
 }
 
+/**
+ * Journal the schema-v1 → v2 config migration ONCE per boot. The handler's
+ * per-call config read (`loadGuardConfig`) is deliberately mute, so without
+ * this a persisted `domains.guard` written for schema v1 would change what the
+ * guard gates without leaving any trace of why.
+ *
+ * Exported so the boot effect body is unit-testable. Never throws: a failed
+ * read or a failed journal write must not stop the guard from booting, and
+ * `migratedKeys.length === 0` writes nothing at all.
+ */
+export async function journalLegacyConfigMigration(journal: Journal, dshHome?: string): Promise<string[]> {
+  try {
+    const { migratedKeys } = await loadGuardConfigWithMigration(dshHome)
+    if (migratedKeys.length === 0) return []
+    const target = migratedKeys.join(',')
+    await journal.append({
+      tool: 'guard',
+      rule: 'config-legacy',
+      tier: 'journal',
+      target,
+      outcome: 'passed',
+      note: `legacy domains.guard keys migrated onto schema v2: ${target}`,
+    })
+    return migratedKeys
+  } catch (e) {
+    console.error('[dsh-maestro-guard] legacy config migration failed:', (e as Error)?.message)
+    return []
+  }
+}
+
 export default {
   inject: ['tools'] as const,
   apply(ctx: Context) {
@@ -125,6 +155,9 @@ export default {
     const handler = createGuardHandler({ journal, policy, readConfig: loadGuardConfig, branchOf, requestApproval })
     ctx.effect(() => ctx.on('tools/pre-execute', handler as any))
     ctx.effect(() => { void retireLegacyStore(journal); return () => {} }, 'guard-retire-legacy-store')
+    // Journal the v1 -> v2 config migration once per boot; the per-call read
+    // stays the cheap `loadGuardConfig`.
+    ctx.effect(() => { void journalLegacyConfigMigration(journal); return () => {} }, 'guard-journal-legacy-config')
     // register on-demand full-scan tool (Task 4) alongside guard handler
     applyFullScan(ctx, {})
   },

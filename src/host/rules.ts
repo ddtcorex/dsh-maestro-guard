@@ -342,19 +342,29 @@ function isPushSegment(seg: Segment): boolean {
  *
  * - a `publish` word sitting BEFORE the resolved subcommand is the value of a
  *   value-taking option (`pnpm --filter publish test`), never the verb;
- * - a `publish` word preceded by a script-runner verb (`npm run publish`,
- *   `npm exec publish`, `yarn dlx publish`) names a script or package that
- *   happens to be called `publish`.
+ * - a SCRIPT RUNNER occupying the resolved subcommand slot (`npm run publish`,
+ *   `npm exec publish`, `yarn dlx publish`) makes every later `publish` word the
+ *   name of a script or a package. The test is positional, never a scan of the
+ *   words before `publish`: a value-taking option's VALUE can read `run`
+ *   (`pnpm --filter run publish` filters the package named `run` and then really
+ *   publishes), and the parser has already consumed that value, so the slot
+ *   holds `publish` and the publish must fire. A scan of the raw argv read the
+ *   option value as a runner and allowed a real publish — the B3/B4 finding this
+ *   positional reading closes.
  */
 function classifyPublish(seg: Segment, command: string): Verdict | undefined {
   const verb = baseName(seg.verb)
   if (verb === undefined || !PACKAGE_MANAGERS.has(verb)) return undefined
   const argv = seg.argv
   const subIndex = seg.subcommand === undefined ? -1 : argv.indexOf(seg.subcommand, 1)
+  // Only a runner in the subcommand SLOT makes `publish` a script/package name.
+  // Reading the slot (not the words before `publish`) is what keeps a flag
+  // between the two (`npm run --silent publish`) suppressed as well.
+  const runnerIsSubcommand = subIndex >= 0 && SCRIPT_RUNNER_VERBS.has(argv[subIndex])
   const isPublishVerb = argv.some((word, i) => {
     if (i < 1 || word !== 'publish') return false
     if (subIndex >= 0 && i < subIndex) return false
-    return !argv.slice(1, i).some((w) => SCRIPT_RUNNER_VERBS.has(w))
+    return !runnerIsSubcommand
   })
   if (!isPublishVerb) return undefined
   const dryRun = seg.flags.some(
