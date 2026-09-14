@@ -13,6 +13,22 @@ All notable changes to this project are documented in this file. Format follows
   protected operation.
 - Decision rules are identified by id (`git.push.protected`, `pkg.publish`, `secret.access`, …)
   and each rule's tier is overridable from `domains.guard.rules`.
+- Command classification is now parsed instead of regex-matched. A shell-aware
+  tokenizer/segmenter splits the command on operators that sit outside quotes, keeps every word
+  and redirection, and marks anything it cannot resolve as ambiguous — ambiguity is never
+  resolved to an allow. This closes the value-taking-global-option bypass
+  (`git -C /repo push origin v1.2.3`, `pnpm --dir /repo publish`, `npm --prefix … publish`),
+  where the old matcher never saw the subcommand.
+- Shell wrappers are unwrapped: `env VAR=…`, `sudo`, `nohup` and `time` are peeled off, and a
+  shell wrapper (`bash -c <script>`, `bash -s`, a `bash <<EOF` body) is replaced by the script it
+  runs, so a wrapped publish or merge is judged as itself. A wrapper whose script cannot be read
+  (a script file, `-c` with no argument, a nest deeper than `MAX_WRAP_DEPTH`, an interpreter's
+  inline program) is marked ambiguous rather than resolved, and an exec-like wrapper the guard
+  deliberately does not unwrap (`timeout`, `nice`, `setsid`, `watch`) keeps its raw surface.
+  Backticks set the same expansion signal as `$(...)`.
+- Heredocs are classified as data or as script: a body fed to a shell is parsed as the commands
+  it runs, while a body fed to a non-shell (`cat`, `tee`, an interpreter) is attached to its
+  segment as `Segment.heredoc` and never turned into segments.
 - `gh pr merge` is recorded in the journal instead of being gated (`journal` tier).
 - Credential scanning no longer reads tool *content*: only the executing command surface and a
   file tool's path field are inspected, which removes the mention-vs-access false positives.
@@ -20,12 +36,35 @@ All notable changes to this project are documented in this file. Format follows
   the pattern set covers registry tokens, env assignments, auth headers and private keys.
 - Fail-closed by construction: a session whose approval policy never prompts is denied with an
   actionable message.
+- The journal is now rotatable and retention-pruned: `Journal.rotate()` archives the live file as
+  `journal-YYYY-MM-DD.jsonl` (serialized, so overlapping calls cannot collide on the name) and
+  removes archived files only once they fall outside BOTH the file-count and the age window.
+  Ordinary (`allow`) decisions stay in memory and reach disk as one periodic `counters`
+  aggregate line, so they never sit on the decision path.
 
 ### Added
 - `~/.dsh/dsh-maestro-guard/journal.jsonl` — durable per-decision record.
+- A rule registry of **11 rule ids** (`git.push.protected`, `git.merge.protected`,
+  `git.tag.release`, `git.push.force`, `gh.release.create`, `gh.protection.delete`, `pkg.publish`,
+  `secret.access`, `fs.write.outside`, `net.exec.remote`, `guard.tamper`) with a default tier per
+  id; every tier except `guard.tamper`'s `deny` floor is overridable from `domains.guard.rules`.
+- A golden corpus (`tests/fixtures/guard-corpus.json`, driven by `tests/corpus.test.ts`): one row
+  per real event — a closed bypass, an over-block now allowed, or a true positive that must keep
+  firing — stated as the `{ ruleId, tier }` the pipeline must produce.
+- Journal counters (`byRule` / `byTier` / `byOutcome` / ask-latency percentiles) and rotation with
+  retention.
+- Two read-only host tools: `maestro_guard_status` (the most recent decisions, the effective rule
+  tiers, the journal path) and `maestro_guard_stats` (the folded counters and ask latencies).
+  Neither can write, approve or re-decide anything. `maestro_full_scan` is unchanged.
+- `domains.guard.journal` knobs — `enabled` (disable journaling), `allowCounters` (stop counting
+  `allow` decisions) and the retention window `retainFiles` (default 14) / `retainDays`
+  (default 30). They are read once at boot, so changing them needs a host restart.
+
 ### Removed
 - `pending.json` ticket store, the approve/list tools and the unused approval store. A legacy
   ticket file is retired to `legacy-pending.json` on first boot.
+- `src/host/sandbox.ts` — its command matching died into `src/host/parse.ts` (shell-aware
+  tokenizer/segmenter and wrapper unwrapping) and its path checks into `src/host/paths.ts`.
 
 ## [0.2.3] - 2026-09-04
 

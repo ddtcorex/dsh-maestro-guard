@@ -1,7 +1,11 @@
 /**
- * Secret families redacted from every copy the guard persists (pending tickets,
- * the decision journal). Redaction applies to the stored copy only — the guard
- * never rewrites the arguments a tool actually executes.
+ * Secret families redacted from every copy the guard persists (the decision
+ * journal). Redaction applies to the stored copy only — the guard never
+ * rewrites the arguments a tool actually executes.
+ *
+ * The journal is the only persistent sink left: `Journal.append` is the single
+ * choke point that redacts every string field of every entry, so no call site
+ * can persist an unredacted value by forgetting to call `redact` itself.
  *
  * The table is split in two on purpose. `SECRET_PATTERNS` are full-replace
  * patterns: the whole match becomes `[REDACTED]`. `PREFIX_KEEPING_PATTERNS` are
