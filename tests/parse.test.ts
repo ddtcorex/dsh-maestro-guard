@@ -355,6 +355,7 @@ describe('parseCommand — a first token that cannot be a command is ambiguous',
     'then git push origin master',
     'pkexec git push origin master',
     'my-custom-runner git push origin master',
+    'find . -exec git push origin master +',
   ]
   for (const command of shapes) {
     it(`flags ${command}`, () => {
@@ -374,6 +375,16 @@ describe('parseCommand — a first token that cannot be a command is ambiguous',
     // outcome still stays allow — the escalation finds no rule shape in the raw
     // text — and `tests/rules.test.ts` pins that at the classify level.
     for (const command of ['ls -la', 'git status', 'pnpm test', 'echo hello']) {
+      expect(parseCommand(command).every((s) => !s.ambiguous), command).toBe(true)
+    }
+  })
+
+  it('does not flag a mention-led command whose later words name a rule verb', () => {
+    // `echo`/`printf`/`grep`/`rg`/… only scan or print their arguments, so the
+    // later-token rule must not apply to a segment they lead — that shape is a
+    // documented mention, not a hidden command. `find` is the one mention verb
+    // that CAN run a later command, and only through `-exec` (pinned above).
+    for (const command of ['rg git push docs/', 'grep -rn npm publish docs', 'echo pnpm publish', 'awk /publish/ docs/x']) {
       expect(parseCommand(command).every((s) => !s.ambiguous), command).toBe(true)
     }
   })

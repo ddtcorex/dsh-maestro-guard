@@ -533,6 +533,34 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
  */
 const RULE_VERBS = new Set(['git', 'gh', 'pnpm', 'npm', 'yarn', 'curl', 'wget', 'source', '.'])
 
+/**
+ * Verbs that only SCAN or PRINT their arguments, never execute them: the
+ * protected phrase in `grep -rn npm publish docs` is the pattern being searched
+ * for, not a command. They lead a segment whose later words name a rule verb
+ * without running it, so the later-token shape test must not apply to them.
+ *
+ * `find` is the one verb here that CAN run a command — but only through
+ * `-exec`, which {@link unresolvedCommand} treats separately. The set is
+ * exported so the rule layer applies the same reading to a protected path.
+ */
+export const MENTION_VERBS = new Set([
+  'grep',
+  'egrep',
+  'fgrep',
+  'rg',
+  'sed',
+  'awk',
+  'echo',
+  'printf',
+  'find',
+  'ls',
+  'test',
+  'wc',
+  'sort',
+  'uniq',
+  'jq',
+])
+
 /** The verb without its directory (`/bin/git` → `git`). */
 function commandBase(text: string): string {
   const cut = text.lastIndexOf('/')
@@ -543,6 +571,13 @@ function commandBase(text: string): string {
  * True when this segment's first token cannot be the command it claims to be, or
  * when a later token names a verb the rules resolve while the first does not.
  * See {@link RULE_VERBS} for why this is a shape test.
+ *
+ * A MENTION verb as the first token opts out of the later-token rule: `echo`,
+ * `printf`, `grep`, `rg`, `awk`, `ls` and friends only scan or print their
+ * arguments, so a rule phrase in them is a documented mention (`rg git push
+ * docs/`), not a hidden command — treating it as one was the over-block this
+ * exemption closes. `find` is the exception, and only through `-exec`, because
+ * that form really does run the command it names.
  */
 function unresolvedCommand(toks: Tok[]): boolean {
   const first = toks[0]
@@ -556,6 +591,9 @@ function unresolvedCommand(toks: Tok[]): boolean {
     // would be flagged ambiguous on the strength of the prefix alone.
     const base = commandBase(firstWord)
     if (RULE_VERBS.has(base) || PREFIX_VERBS.has(base)) return false
+    if (MENTION_VERBS.has(base)) {
+      return base === 'find' && toks.some((t) => t.kind === 'word' && t.text === '-exec')
+    }
   }
   return toks.some((t, i) => i > 0 && t.kind === 'word' && RULE_VERBS.has(t.text))
 }

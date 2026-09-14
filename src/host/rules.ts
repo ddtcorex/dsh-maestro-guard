@@ -7,6 +7,7 @@ import {
   getCommandWorkingDir,
   stripQuoted,
   EXEC_WRAPPERS,
+  MENTION_VERBS,
   OPAQUE_VERBS,
   type Segment,
 } from './parse.js'
@@ -103,8 +104,6 @@ const FILE_TOOLS = new Set([
 const WRITE_FILE_TOOLS = new Set(['write', 'edit', 'maestro_write_file', 'fs_write', 'write_file'])
 /** Verbs that actually touch file contents — a protected path next to one is an access. */
 const ACCESS_VERBS = /\b(cat|bat|head|tail|less|more|cp|scp|rsync|curl|wget|source|tee|dd|install|xxd|base64|openssl|gpg|tar|zip)\b/
-/** Verbs that only scan/print the argument itself — mentioning a path is not reading it. */
-const MENTION_VERBS = /^\s*(grep|egrep|fgrep|rg|sed|awk|echo|printf|find|ls|test|wc|sort|uniq|jq)\b/
 
 /**
  * Verbs that WRITE the file they name. A guard path next to one of these is an
@@ -543,7 +542,7 @@ function mutatesGuardPath(seg: Segment, guardSpellings: string[]): boolean {
  */
 function isAccess(seg: Segment, protectedPaths: string[]): boolean {
   const verb = baseName(seg.verb)
-  if (verb !== undefined && MENTION_VERBS.test(verb)) return false
+  if (verb !== undefined && MENTION_VERBS.has(verb)) return false
   const argvSurface = seg.argv.join(' ')
   if (!isBlockedPath(argvSurface, protectedPaths)) return false
   return seg.ambiguous || ACCESS_VERBS.test(argvSurface)

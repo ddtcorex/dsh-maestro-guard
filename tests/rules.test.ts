@@ -168,6 +168,35 @@ describe('classify — a first token that cannot be a command escalates (never a
   }
 })
 
+/**
+ * PRECISION follow-up (the scoped re-review's C2 over-block) — a LATER token
+ * naming a rule verb marked the whole segment unresolved, so a command that only
+ * MENTIONS a rule phrase asked: `rg git push docs/`, `grep -rn npm publish docs`
+ * and `echo pnpm publish` all became prompts. The parser already knows these
+ * verbs cannot execute their arguments (`MENTION_VERBS`), so a mention-led
+ * segment no longer applies the later-token rule. `find … -exec <cmd>` still
+ * escalates, because find really does run that command.
+ */
+describe('classify — a mention-led segment does not escalate on a later rule verb', () => {
+  const mentions = [
+    'rg git push docs/',
+    'grep -rn npm publish docs',
+    'echo pnpm publish',
+  ]
+  for (const command of mentions) {
+    it(`stays an allow for the mention: ${command}`, () => {
+      expect(call(command).tier).toBe('allow')
+    })
+  }
+
+  it('still escalates a find -exec that really runs the command', () => {
+    expect(call('find . -exec git push origin master +')).toMatchObject({
+      ruleId: 'git.push.protected',
+      tier: 'ask',
+    })
+  })
+})
+
 describe('classify — fs.write.outside (whole write family, temp dir exempt)', () => {
   const outside = { file_path: '/etc/hosts' }
   it('asks when the native write tool targets a path outside cwd and outside tmpdir', () => {
