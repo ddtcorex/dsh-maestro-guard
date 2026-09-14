@@ -286,4 +286,16 @@ describe('journal retention windows are validated', () => {
     expect(config.journal.enabled).toBe(DEFAULT_CONFIG.journal.enabled)
     expect(config.journal.allowCounters).toBe(DEFAULT_CONFIG.journal.allowCounters)
   })
+
+  it('rejects a fractional window instead of flooring it to zero', () => {
+    // `0.5 > 0` passed the positivity check and `Math.floor` turned it into 0,
+    // and a zero window prunes EVERY archive — the exact failure this validation
+    // exists to prevent. A retention window counts days/files, so it is an
+    // integer; a fractional value falls back like any other invalid one.
+    for (const bad of [0.5, 1.5]) {
+      const { config } = mapLegacyConfig({ journal: { retainDays: bad, retainFiles: bad } })
+      expect(config.journal.retainDays, `retainDays=${bad}`).toBe(DEFAULT_CONFIG.journal.retainDays)
+      expect(config.journal.retainFiles, `retainFiles=${bad}`).toBe(DEFAULT_CONFIG.journal.retainFiles)
+    }
+  })
 })

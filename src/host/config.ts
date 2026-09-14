@@ -45,15 +45,20 @@ function stringArray(v: unknown): string[] | undefined {
 }
 
 /**
- * A retention window must be a positive finite number. The journal block used to
- * be spread into the defaults unvalidated, and `rotate()` multiplies/compares
- * with both windows: `retainDays: "30"` makes the day cutoff `NaN` and
+ * A retention window must be a POSITIVE INTEGER. The journal block used to be
+ * spread into the defaults unvalidated, and `rotate()` multiplies/compares with
+ * both windows: `retainDays: "30"` makes the day cutoff `NaN` and
  * `retainFiles: "14"` makes the file window compare false, so BETWEEN them a
  * non-numeric value prunes EVERY archive. An invalid value falls back to the
  * built-in default — the fail-safe direction for a retention window.
+ *
+ * The value is never floored: `0.5` passed the `> 0` check and `Math.floor`
+ * turned it into 0, which prunes every archive — the very failure this
+ * validation exists to prevent. A window counts days/files, so a fraction is
+ * simply invalid and falls back like any other bad value.
  */
 function positiveInt(v: unknown): number | undefined {
-  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : undefined
+  return typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : undefined
 }
 
 /** A boolean config switch, or the built-in default when it is not a boolean. */

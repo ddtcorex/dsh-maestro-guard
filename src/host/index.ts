@@ -41,6 +41,10 @@ export const CONTRACT_MISMATCH_RULE = 'contract-mismatch'
  * renames a field — and a renamed `args` silently disables EVERY command rule,
  * because `extractCommandText(undefined)` yields no command to classify.
  * Spec §8: an unknown payload is a denial, never a pass.
+ *
+ * A `null` argument list counts as ABSENT, not as an empty one: `??` already
+ * falls through on null, so treating it as present would let a null `args`
+ * reach `extractCommandText` and allow a command the rules never saw.
  */
 export function contractMismatch(exec: unknown): string | undefined {
   if (exec === null || typeof exec !== 'object') return 'pre-execute payload is not an object'
@@ -49,7 +53,7 @@ export function contractMismatch(exec: unknown): string | undefined {
     ? e.name
     : typeof e.tool === 'string' && e.tool !== '' ? e.tool : undefined
   if (name === undefined) return 'pre-execute payload carries no tool name (`name`/`tool`)'
-  if (e.args === undefined && e.arguments === undefined) {
+  if ((e.args === undefined || e.args === null) && (e.arguments === undefined || e.arguments === null)) {
     return 'pre-execute payload carries no arguments (`args`/`arguments`)'
   }
   return undefined

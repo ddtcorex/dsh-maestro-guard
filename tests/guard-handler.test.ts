@@ -248,6 +248,19 @@ describe('createGuardHandler — runtime contract and the approval error note', 
     expect(entry).toMatchObject({ rule: 'contract-mismatch', tier: 'deny' })
   })
 
+  it('denies and journals contract-mismatch when args is null, not undefined', async () => {
+    // `null` is a MISSING argument list, not an empty one: only `undefined` was
+    // treated as absent, so a null `args` on a shell tool fell through to
+    // `extractCommandText(undefined)` and every command rule read nothing.
+    const { handler, next, dir } = await setup('granted')
+    const res = await handler({ name: 'bash', args: null } as any, next)
+    expect(res.kind).toBe('deny')
+    expect(String((res as any).reason)).toContain('contract-mismatch')
+    const entry = JSON.parse((await readFile(journalPath(dir), 'utf8')).trim())
+    expect(entry).toMatchObject({ rule: 'contract-mismatch', tier: 'deny', outcome: 'denied' })
+    expect(entry.note).toContain('args')
+  })
+
   it('denies a payload that is not an object at all', async () => {
     const { handler, next, dir } = await setup('granted')
     const res = await handler(undefined as any, next)
