@@ -211,11 +211,17 @@ describe('classify — a mention-led segment does not escalate on a later rule v
     })
   }
 
-  it('still escalates a find -exec that really runs the command', () => {
-    expect(call('find . -exec git push origin master +')).toMatchObject({
-      ruleId: 'git.push.protected',
-      tier: 'ask',
-    })
+  it('still escalates every find action flag that really runs the command', () => {
+    // `find` is the one mention verb that can execute a later command, and four
+    // action flags do so. Only `-exec` was recognized, so a protected push under
+    // `-execdir`/`-ok` was an allow.
+    for (const command of [
+      'find . -exec git push origin master +',
+      'find . -execdir git push origin master +',
+      'find . -ok git push origin master +',
+    ]) {
+      expect(call(command), command).toMatchObject({ ruleId: 'git.push.protected', tier: 'ask' })
+    }
   })
 })
 

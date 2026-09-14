@@ -356,6 +356,8 @@ describe('parseCommand — a first token that cannot be a command is ambiguous',
     'pkexec git push origin master',
     'my-custom-runner git push origin master',
     'find . -exec git push origin master +',
+    'find . -execdir git push origin master +',
+    'find . -ok git push origin master +',
   ]
   for (const command of shapes) {
     it(`flags ${command}`, () => {
@@ -383,7 +385,7 @@ describe('parseCommand — a first token that cannot be a command is ambiguous',
     // `echo`/`printf`/`grep`/`rg`/… only scan or print their arguments, so the
     // later-token rule must not apply to a segment they lead — that shape is a
     // documented mention, not a hidden command. `find` is the one mention verb
-    // that CAN run a later command, and only through `-exec` (pinned above).
+    // that CAN run a later command, and only through an action flag (pinned above).
     for (const command of ['rg git push docs/', 'grep -rn npm publish docs', 'echo pnpm publish', 'awk /publish/ docs/x']) {
       expect(parseCommand(command).every((s) => !s.ambiguous), command).toBe(true)
     }
