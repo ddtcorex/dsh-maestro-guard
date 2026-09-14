@@ -36,8 +36,9 @@ parse → classify → decide → journal → act
    path cannot hide it. A segment LED by a mention verb (`echo`, `printf`, `grep`, `rg`, `sed`,
    `awk`, `ls`, `find`, …) opts out of that later-token rule, because those verbs cannot execute
    their arguments: `rg git push docs/` and `echo pnpm publish` are a search and a print, not
-   commands. `find … -exec <cmd> +` is the exception and still asks. A shell handed a `-c` script
-   by a verb the guard cannot name (`my-custom-runner bash -c "git push origin master"`) is
+   commands. `find` is the one exception, and through any of its action flags (`-exec`,
+   `-execdir`, `-ok`) it still asks. A shell handed a `-c` script by a verb the guard cannot name
+   (`my-custom-runner bash -c "git push origin master"`) is
    unwrapped like any other shell wrapper, so that script is judged as the command that really
    runs. And a quoted protected path is not erased: `secret.access` reads the parsed segment argv,
    where the tokenizer has already dropped the quotes and kept the content, so `cat "<path>"`,
@@ -49,12 +50,15 @@ parse → classify → decide → journal → act
    `protected path: quoted …` rows pin those decisions — including the deliberate fail-closed
    trade-off that an interpreter inline program which names a protected path asks again.
    `guard.tamper` is the one rule that judges the raw segment text rather than a resolved shape,
-   and even there only an EDIT counts: a mutating verb (`rm`, `mv`, `cp`, `truncate`, `shred`,
-   `dd`, `tee`, `install`, `chmod`, `chown`, `sed -i`, `perl -i`) naming a guard path, or a write
-   redirection (`>`, `>>`, `2>`, `&>`) whose TARGET is one — in the absolute, `~`, `$HOME` or
-   `${HOME}` spelling. A READ of the same path (`cat`, `tail`, `head`, `grep`, `less`) is not
-   tampering and falls through to the ordinary rules, which is what makes the guard's own deny
-   text ("see the guard journal") followable.
+   and even there only an EDIT counts: a mutating verb (`rm`, `mv`, `cp`, `ln`, `truncate`,
+   `shred`, `dd`, `tee`, `install`, `chmod`, `chown`, `sed -i`, `perl -i`) naming a guard path, or a
+   write redirection (`>`, `>>`, `2>`, `&>`, `>|`) whose TARGET is one — in the absolute, `~`,
+   `$HOME` or `${HOME}` spelling. The mutation does not have to be the segment's own verb: a wipe
+   handed to a wrapper (`nice`, `timeout`, `flock`, `ssh`, `xargs`, `eval`), to a `find` action
+   flag, to a `-c` script, or to an `xargs` fed across a pipe counts too, because all of those are
+   the same edit arriving one level down. A READ of the same path (`cat`, `tail`, `head`, `grep`,
+   `less`) is not tampering and falls through to the ordinary rules, which is what makes the
+   guard's own deny text ("see the guard journal") followable.
 2. **classify** — map the call to a stable rule id (below), resolving the branch of the repo the
    command targets through its `cd` / `git -C`.
 3. **decide** — resolve the tier: the classified tier, unless `domains.guard.rules` carries an
@@ -81,7 +85,7 @@ them. There are **11**:
 | `secret.access` | `ask` | access to a protected credential path — **any** file tool (read *or* write) whose path field is the protected path, or a parsed segment whose COMMAND is an access verb and whose argv holds the path (a mention-only verb such as `grep`/`ls`/`printf` is never an access, an access verb inside a message or body is not the command, and a heredoc body is never argv) |
 | `fs.write.outside` | `ask` | a file-tool write outside the session working directory (the OS temp dir is exempt, and so is the runtime spill dir while `spillReads` is on) |
 | `net.exec.remote` | `ask` | piping a remote script into a shell (`curl … \| sh`, `source <(curl …)`) |
-| `guard.tamper` | `deny` | EDITING the guard's own config paths — a mutating verb naming one, or a write redirection targeting one, in the absolute / `~` / `$HOME` / `${HOME}` spelling (a read of the same path is not tampering) |
+| `guard.tamper` | `deny` | EDITING the guard's own config paths — a mutating verb naming one, or a write redirection targeting one, in the absolute / `~` / `$HOME` / `${HOME}` spelling, whether the mutating verb leads the segment or arrives behind a wrapper, a `find` action flag, a `-c` script or an `xargs` (a read of the same path is not tampering) |
 
 `guard.tamper` is an unappealable `deny` floor — it cannot be downgraded by configuration.
 Every other default tier can be overridden per rule id in `domains.guard.rules`.

@@ -112,7 +112,7 @@ All notable changes to this project are documented in this file. Format follows
     spellings of every guard path rather than only the absolute one.
   - A mention-led segment no longer escalates: `rg git push docs/`, `grep -rn npm publish docs`
     and `echo pnpm publish` stay `allow` (those verbs cannot execute their arguments), while
-    `find … -exec <cmd> +` still asks.
+    `find` still asks through any of its action flags (`-exec`, `-execdir`, `-ok`, `-okdir`).
   - `secret.access` tests the access verb against the segment's **command**, not the whole argv,
     so a commit message or PR body that merely writes `cat <path>` is text about the path and no
     longer asks.
@@ -121,6 +121,24 @@ All notable changes to this project are documented in this file. Format follows
     as the command that really runs.
   - `contractMismatch` treats a `null` argument list as absent, and a retention window must be a
     positive INTEGER — `retainDays: 0.5` used to floor to 0 and prune every archive.
+- Fix wave on that follow-up's own deny-tier regression, found by re-review and measured against
+  the built classifier. Narrowing `guard.tamper` to EDITS left the tier blind to every mutation
+  whose verb is not the segment's own, because the parser marks an exec wrapper `ambiguous`
+  instead of unwrapping it — each of these resolved to `allow`, i.e. a wipe of the guard's own
+  journal with no prompt at all, where the pre-fix build denied even a bare mention:
+  - a mutation behind a wrapper: `nice`, `timeout 5`, `flock L`, `ssh host`, `doas`, `xargs`,
+    `eval`;
+  - a mutation `find` runs: `-exec` (already covered), plus `-execdir`, `-ok`, `-okdir`;
+  - a mutation one level deeper: `find … -exec bash -c "rm -f <journal>" +`;
+  - a mutation an OPAQUE verb takes across a pipe: `echo <journal> | xargs rm -f`;
+  - a clobber redirect: `echo x >| <journal>` (the tokenizer split `>|` into `>` and `|`, so the
+    target became a segment of its own that no rule read);
+  - a symlink swap in place of the journal: `ln` is now a mutating verb.
+
+  The read exemption is unchanged and re-pinned: a mutation WORD is only read at a command
+  position, so `rg rm <journal>`, `echo rm -f <journal>`, `timeout 5 cat <journal>` and
+  `find . -exec cat <journal> +` all stay `allow`. `touch` on a guard path also stays an allow —
+  it destroys no content, and an empty config loads as the built-in defaults.
 
 ### Removed
 - `pending.json` ticket store, the approve/list tools and the unused approval store. A legacy
