@@ -69,9 +69,9 @@ export function contractMismatch(exec: unknown): string | undefined {
  */
 const EXPLAIN: Record<AskOutcome, string> = {
   granted: 'granted once',
-  rejected: 'not approved — the user rejected it, or this session does not prompt (a `never` approval policy rejects every ask); start a session under the full-access-ask preset or switch the preset in the picker',
+  rejected: 'not approved — the user rejected it, or this session does not prompt (a `never` approval policy rejects every ask); start a session under a preset that prompts (danger-full-access now asks in this deployment) or switch the preset in the picker',
   cancelled: 'the approval prompt was cancelled',
-  unavailable: 'no approval channel is available for this session (start a session under the full-access-ask preset)',
+  unavailable: 'no approval channel is available for this session (start a session under a preset that prompts — danger-full-access now asks in this deployment)',
   error: 'the approval request failed (see the guard journal)',
 }
 

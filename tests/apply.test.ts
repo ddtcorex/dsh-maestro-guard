@@ -92,7 +92,7 @@ describe('apply() fail-closed matrix (spec §9.4)', () => {
     expect(res.kind).toBe('deny')
     expect(String(res.reason)).toMatch(/git\.push\.protected/)
     expect(String(res.reason)).toMatch(/no approval channel is available/i)
-    expect(String(res.reason)).toMatch(/full-access-ask/)
+    expect(String(res.reason)).toMatch(/danger-full-access/)
     expect(await lastEntry()).toMatchObject({ rule: 'git.push.protected', tier: 'ask', outcome: 'unavailable' })
   })
 
@@ -101,7 +101,7 @@ describe('apply() fail-closed matrix (spec §9.4)', () => {
     const res: any = await handler(pushCall(undefined), next)
     expect(res.kind).toBe('deny')
     expect(String(res.reason)).toMatch(/no approval channel is available/i)
-    expect(String(res.reason)).toMatch(/full-access-ask/)
+    expect(String(res.reason)).toMatch(/danger-full-access/)
     expect(await lastEntry()).toMatchObject({ outcome: 'unavailable' })
   })
 
@@ -128,7 +128,7 @@ describe('apply() fail-closed matrix (spec §9.4)', () => {
     const res: any = await handler(pushCall(withAgent), next)
     expect(res.kind).toBe('deny')
     expect(String(res.reason)).toMatch(/git\.push\.protected/)
-    expect(String(res.reason)).toMatch(/full-access-ask/)
+    expect(String(res.reason)).toMatch(/danger-full-access/)
     expect(await lastEntry()).toMatchObject({ tier: 'ask', outcome: 'rejected' })
   })
 

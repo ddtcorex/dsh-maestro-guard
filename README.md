@@ -89,7 +89,7 @@ registers **no** approval tool, so no agent can grant itself a protected operati
 **Fail-closed by construction:** a session whose approval policy never prompts, an agent-less
 execution, or a missing/unreachable `approval` service all resolve to a denial that names the
 cause and the fix — the shipped `unavailable` message reads `no approval channel is available for
-this session (start a session under the full-access-ask preset)`. Nothing is ever allowed silently
+this session (start a session under a preset that prompts — this deployment's `danger-full-access` now asks)`. Nothing is ever allowed silently
 because the prompt could not be raised.
 
 A `request()` that throws is denied with `the approval request failed (see the guard journal)`, and
@@ -193,9 +193,10 @@ An `ask` tier only bites if the session actually prompts, and two deployment fil
 
 - the **`permission` row** in the `web` profile composition
   (`~/.dsh/profiles/web/cordis.patch.yml`) — its `presets` table must define
-  `full-access-ask` (`sandbox: danger-full-access`, `approval: ask`);
-- **`permission.defaultPreset`** in `~/.dsh/settings.yaml` — must name `full-access-ask`, so new
-  sessions prompt instead of running under `danger-full-access` + `approval: never`.
+  `danger-full-access` with `approval: ask` (the prompting full-access mode rides the existing
+  preset value so it keeps the picker's built-in shield glyph, product label and risk confirmation);
+- **`permission.defaultPreset`** in `~/.dsh/settings.yaml` — must name `danger-full-access`, so new
+  sessions prompt instead of running under an `approval: never` preset.
 
 Change one without the other and every `ask` denies (fail-closed, but unusable). Rollback: set
 `permission.defaultPreset` back to `danger-full-access`, remove the `permission` row patch,
