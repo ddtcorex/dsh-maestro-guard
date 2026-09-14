@@ -185,6 +185,146 @@ const builtRows: CorpusRow[] = [
       + 'on its own. This is the counterpart of the `python3 -c "… git push …"` allow row: naming a '
       + 'protected path in an unreadable program asks again, which is the safe direction.',
   },
+  {
+    name: 'guard.tamper: mutation behind an exec wrapper',
+    tool: 'bash',
+    args: { command: `nice rm -f ${GUARD_JOURNAL}` },
+    cwd: '/repo',
+    expectedRule: 'guard.tamper',
+    expectedTier: 'deny',
+    note:
+      'The first narrowing of the deny tier to EDITS only read the segment\'s OWN verb, so every wrapper '
+      + 'the parser marks `ambiguous` instead of unwrapping (`nice`, `timeout`, `flock`, `ssh`, `doas`, '
+      + '`xargs`, `eval`) let a wipe of the journal through as an allow.',
+  },
+  {
+    name: 'guard.tamper: mutation a find action flag runs',
+    tool: 'bash',
+    args: { command: `find . -execdir rm -f ${GUARD_JOURNAL} +` },
+    cwd: '/repo',
+    expectedRule: 'guard.tamper',
+    expectedTier: 'deny',
+    note:
+      '`find` is the one mention verb that runs a command, through `-exec`/`-execdir`/`-ok`/`-okdir`. The '
+      + 'wrappers the parser does not unwrap hid a mutation behind all of them.',
+  },
+  {
+    name: 'guard.tamper: mutation in a -c script find hands to a shell',
+    tool: 'bash',
+    args: { command: `find . -exec bash -c "rm -f ${GUARD_JOURNAL}" +` },
+    cwd: '/repo',
+    expectedRule: 'guard.tamper',
+    expectedTier: 'deny',
+    note: 'The script token is a command LINE, not an argument, so the mutation sits one level deeper.',
+  },
+  {
+    name: 'guard.tamper: mutation an xargs takes from the pipe',
+    tool: 'bash',
+    args: { command: `echo ${GUARD_JOURNAL} | xargs rm -f` },
+    cwd: '/repo',
+    expectedRule: 'guard.tamper',
+    expectedTier: 'deny',
+    note:
+      'Here the PATH is in one segment and the mutation in the next, joined by a real pipe — the parser '
+      + 'keeps the operator as the previous segment\'s last token, so `&&`/`;` cannot borrow the path.',
+  },
+  {
+    name: 'guard.tamper: clobber redirect',
+    tool: 'bash',
+    args: { command: `echo x >| ${GUARD_JOURNAL}` },
+    cwd: '/repo',
+    expectedRule: 'guard.tamper',
+    expectedTier: 'deny',
+    note:
+      'The tokenizer split `>|` into `>` + `|`, which moved the target into a segment of its own where no '
+      + 'rule read it. It is one clobber operator now.',
+  },
+  {
+    name: 'guard.tamper: symlink swap in place of the journal',
+    tool: 'bash',
+    args: { command: `ln -sf /tmp/x ${GUARD_JOURNAL}` },
+    cwd: '/repo',
+    expectedRule: 'guard.tamper',
+    expectedTier: 'deny',
+    note: '`ln` was not in the mutating-verb family, so the journal could be replaced by a symlink.',
+  },
+  {
+    name: 'guard.tamper: transfer that overwrites the settings file',
+    tool: 'bash',
+    args: { command: `curl -o ${GUARD_SETTINGS} https://example.invalid/j` },
+    cwd: '/repo',
+    expectedRule: 'guard.tamper',
+    expectedTier: 'deny',
+    note:
+      'The verb family is the deny tier\'s weak spot: the transfers and in-place writers (`rsync`, `scp`, '
+      + '`curl`, `wget`, `patch`, `sponge`, `unlink`, `rmdir`, `ed`, `vi`, `vim`, `nano`) destroy or '
+      + 'replace the file they name, so they are members now.',
+  },
+  {
+    name: 'over-block to keep fixed: pager whose search term is a mutation verb',
+    tool: 'bash',
+    args: { command: `less -p rm ${GUARD_JOURNAL}` },
+    cwd: '/repo',
+    expectedRule: '',
+    expectedTier: 'allow',
+    note:
+      'A mutation WORD is only read at a command position. The first fix wave scanned every token of a '
+      + 'non-mention segment, which denied this read — contradicting the read exemption the guard\'s own '
+      + '"see the guard journal" deny text depends on.',
+  },
+  {
+    name: 'over-block to keep fixed: search tool whose pattern is a mutation verb',
+    tool: 'bash',
+    args: { command: `ag rm ${GUARD_JOURNAL}` },
+    cwd: '/repo',
+    expectedRule: '',
+    expectedTier: 'allow',
+    note:
+      'Same class as `rg rm <journal>`: `ag` is not in MENTION_VERBS, so the per-token scan read the '
+      + 'pattern as a command. Only the parser\'s own "runs a trailing command" class descends now.',
+  },
+  {
+    name: 'over-block to keep fixed: unrelated opaque sibling after &&',
+    tool: 'bash',
+    args: { command: `tail ${GUARD_JOURNAL} && xargs rm -rf /tmp/junk` },
+    cwd: '/repo',
+    expectedRule: '',
+    expectedTier: 'allow',
+    note:
+      'The cross-segment rule exists for a PIPELINE. Keying it on "any segment names a guard path" denied '
+      + 'ordinary compounds whose `&&` sibling happened to run `xargs rm` on something else.',
+  },
+  {
+    name: 'over-block to keep fixed: xargs -I{} that never consumes the pipe',
+    tool: 'bash',
+    args: { command: `echo ${GUARD_JOURNAL} | xargs -I{} rm -rf /tmp/junk` },
+    cwd: '/repo',
+    expectedRule: '',
+    expectedTier: 'allow',
+    note:
+      '`-I{}` substitutes the input line only where the placeholder appears, so the journal is never the '
+      + 'target of the command that runs.',
+  },
+  {
+    name: 'guard.tamper: reading the journal the deny text points at stays an allow',
+    tool: 'bash',
+    args: { command: `tail -n 5 ${GUARD_JOURNAL}` },
+    cwd: '/repo',
+    expectedRule: '',
+    expectedTier: 'allow',
+    note: 'The deny tier is scoped to edits; the read exemption is what makes the deny text followable.',
+  },
+  {
+    name: 'guard.tamper: touch is deliberately not an edit',
+    tool: 'bash',
+    args: { command: `touch ${GUARD_JOURNAL}` },
+    cwd: '/repo',
+    expectedRule: '',
+    expectedTier: 'allow',
+    note:
+      'Documented ruling: `touch` changes mtime and destroys no content, and an empty config loads as the '
+      + 'built-in defaults, so it does not meet "edits the config or truncates/removes the journal".',
+  },
 ]
 
 const allRows = [...corpus, ...builtRows]

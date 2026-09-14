@@ -205,6 +205,17 @@ describe('tokenizer', () => {
     expect(s.paths).toContain('/tmp/out.log')
     expect(s.flags).toContain('>')
   })
+  it('reads >| as ONE clobber redirection, not a redirect then a pipe', () => {
+    // Splitting at the `|` moved the target into a segment of its own, where no
+    // rule read it: a clobber of a guard path reached nothing at all.
+    const segs = parseCommand('git push origin master >| /tmp/out.log')
+    expect(segs).toHaveLength(1)
+    expect(segs[0].argv).toContain('>|')
+    expect(segs[0].flags).toContain('>|')
+    expect(segs[0].paths).toContain('/tmp/out.log')
+    // The fd-prefixed separated form is one token too.
+    expect(parseCommand('echo x 2>| /tmp/out.log')[0].argv).toContain('2>|')
+  })
   it('does not mistake an fd duplication for a path', () => {
     const [s] = parseCommand('git push origin master 2>&1')
     expect(s.refspecs).toEqual(['origin', 'master'])
