@@ -1,0 +1,258 @@
+import { describe, it, expect } from 'vitest'
+import { parseCommand, MAX_WRAP_DEPTH } from '../src/host/parse.js'
+
+// Task B1: the guard stops matching regular expressions against the raw command
+// string and starts reading a parsed command surface instead. The parser is
+// deliberately shallow — segments, argv, and the few facts the rule layer needs
+// — but it must not inherit the holes of the string matchers it replaces, the
+// sharpest of which is a git global option hiding the subcommand:
+// `git -C /repo push origin v1.2.3` never matched `\bgit\s+push\b`.
+
+describe('parseCommand', () => {
+  it('splits on operators outside quotes', () => {
+    const segs = parseCommand('cd /repo && git push origin "feat/a && b"')
+    expect(segs.map((s) => s.verb)).toEqual(['cd', 'git'])
+    expect(segs[1].argv).toContain('feat/a && b')
+  })
+  it('classifies git push refspecs', () => {
+    const [s] = parseCommand('git push --force origin master')
+    expect(s).toMatchObject({ verb: 'git', subcommand: 'push', ambiguous: false })
+    expect(s.flags).toContain('--force')
+    expect(s.refspecs).toEqual(['origin', 'master'])
+  })
+  it('keeps every token (no segment loss)', () => {
+    const cmd = "bash -c 'echo a; echo b' ; echo c"
+    const tokenCount = (s: string) => s.split(/\s+/).filter(Boolean).length
+    expect(parseCommand(cmd).reduce((n, s) => n + s.argv.length, 0)).toBeGreaterThanOrEqual(tokenCount('echo a echo b echo c'))
+  })
+  it('marks an unresolvable cd target ambiguous', () => {
+    const segs = parseCommand('cd "$D" && git push origin HEAD')
+    expect(segs[0].ambiguous).toBe(true)
+  })
+})
+
+// The bypass the controller ruling closes: a value-taking git global option sits
+// between `git` and its subcommand, so the subcommand must be the first non-flag
+// token AFTER those options are consumed — never simply argv[1].
+describe('git global options never hide the subcommand', () => {
+  it('sees push past -C and keeps the refspec', () => {
+    const [s] = parseCommand('git -C /repo push origin v1.2.3')
+    expect(s.verb).toBe('git')
+    expect(s.subcommand).toBe('push')
+    expect(s.refspecs).toEqual(['origin', 'v1.2.3'])
+    expect(s.ambiguous).toBe(false)
+  })
+  it('sees push past -C for a branch refspec', () => {
+    const [s] = parseCommand('git -C /repo push origin master')
+    expect(s.subcommand).toBe('push')
+    expect(s.refspecs).toContain('master')
+  })
+  it('never leaks the option value into the refspecs', () => {
+    expect(parseCommand('git -C /repo push origin v1.2.3')[0].refspecs).not.toContain('/repo')
+  })
+  it('consumes every value-taking global option the guard relies on', () => {
+    const commands = [
+      'git -c user.name=x push origin main',
+      'git --git-dir /repo/.git push origin main',
+      'git --git-dir=/repo/.git push origin main',
+      'git --work-tree /repo push origin main',
+      'git --work-tree=/repo push origin main',
+      'git --namespace ns push origin main',
+      'git --namespace=ns push origin main',
+      'git --exec-path /usr/lib/git-core push origin main',
+      'git --exec-path=/usr/lib/git-core push origin main',
+      'git --config-env http.proxy=PROXY push origin main',
+      'git --config-env=http.proxy=PROXY push origin main',
+    ]
+    for (const command of commands) {
+      expect({ command, subcommand: parseCommand(command)[0].subcommand }).toEqual({ command, subcommand: 'push' })
+    }
+  })
+  it('skips valueless global flags without eating the subcommand', () => {
+    expect(parseCommand('git -p --paginate --no-pager push origin main')[0].subcommand).toBe('push')
+  })
+  it('keeps the options visible as flags', () => {
+    expect(parseCommand('git -C /repo push origin v1.2.3')[0].flags).toContain('-C')
+  })
+  it('invents no subcommand for a flag-only invocation', () => {
+    expect(parseCommand('git --version')[0].subcommand).toBeUndefined()
+    expect(parseCommand('git -C /repo')[0].subcommand).toBeUndefined()
+  })
+  it('consumes several global options in one invocation', () => {
+    const [s] = parseCommand('git --git-dir /repo/.git --work-tree /repo -c core.pager=cat push origin main')
+    expect(s.subcommand).toBe('push')
+    expect(s.refspecs).toEqual(['origin', 'main'])
+  })
+  it('sees a publish behind a package-manager global option', () => {
+    const [s] = parseCommand('pnpm --dir /repo publish')
+    expect(s.verb).toBe('pnpm')
+    expect(s.subcommand).toBe('publish')
+  })
+})
+
+// Fix round 1 — finding 1: the value-taking table is a denylist, so an option it
+// does not list is assumed valueless and the token after it is read as the
+// subcommand. `git --shallow-file /tmp/x push origin v1.2.3` therefore returned
+// `subcommand: '/tmp/x'` with `ambiguous: false` — the very `git -C` bypass,
+// reached with a different flag. Both halves are required: table the git globals
+// that really consume a separate value (verified against real git), and fail
+// CLOSED on any option that is in neither table, because the parser provably
+// cannot tell `git --bare push` (valueless) from `git --shallow-file x push`.
+describe('unknown pre-subcommand options are fail-closed', () => {
+  it('consumes --shallow-file as a separate value (verified against git 2.53)', () => {
+    const [s] = parseCommand('git --shallow-file /tmp/x push origin v1.2.3')
+    expect(s.subcommand).toBe('push')
+    expect(s.refspecs).toEqual(['origin', 'v1.2.3'])
+    expect(s.ambiguous).toBe(false)
+  })
+  it('consumes --attr-source as a separate value (verified against git 2.53)', () => {
+    const [s] = parseCommand('git --attr-source /tmp/x push origin v1.2.3')
+    expect(s.subcommand).toBe('push')
+    expect(s.refspecs).toEqual(['origin', 'v1.2.3'])
+    expect(s.ambiguous).toBe(false)
+  })
+  it('keeps --list-cmds=<group> self-contained, as git requires', () => {
+    // Audited: `git --list-cmds /tmp/x rev-parse …` dies with "unknown option:
+    // --list-cmds"; only the `=` form exists, which the parser already reads as
+    // self-contained. It must therefore NOT enter the value-taking table.
+    const [s] = parseCommand('git --list-cmds=main push origin v1.2.3')
+    expect(s.subcommand).toBe('push')
+    expect(s.ambiguous).toBe(false)
+  })
+  it('marks an unknown long option followed by a word ambiguous', () => {
+    const [s] = parseCommand('git --totally-unknown x push origin main')
+    expect(s.ambiguous).toBe(true)
+  })
+  it('marks the segment ambiguous however the hidden word reads', () => {
+    const commands = ['git --totally-unknown x push origin main', 'git --totally-unknown push x main']
+    for (const command of commands) {
+      expect({ command, ambiguous: parseCommand(command)[0].ambiguous }).toEqual({ command, ambiguous: true })
+    }
+  })
+  it('fails closed for a non-git verb too (a hidden publish)', () => {
+    expect(parseCommand('pnpm --totally-unknown x publish')[0].ambiguous).toBe(true)
+  })
+  it('treats a verified valueless long option as valueless', () => {
+    // Audited with real git: `git --bare rev-parse …` runs rev-parse, so `--bare`
+    // consumes nothing and the subcommand is still readable.
+    const [s] = parseCommand('git --bare push origin main')
+    expect(s.subcommand).toBe('push')
+    expect(s.refspecs).toEqual(['origin', 'main'])
+    expect(s.ambiguous).toBe(false)
+  })
+  it('does not mark a dangling unknown option ambiguous', () => {
+    expect(parseCommand('git --totally-unknown')[0].ambiguous).toBe(false)
+  })
+  it('keeps a self-contained unknown --name=value readable', () => {
+    expect(parseCommand('git --totally-unknown=1 push origin main')[0]).toMatchObject({
+      subcommand: 'push',
+      ambiguous: false,
+    })
+  })
+  it('still resolves the legitimate forms', () => {
+    expect(parseCommand('git -c core.pager=cat status')[0]).toMatchObject({
+      verb: 'git',
+      subcommand: 'status',
+      ambiguous: false,
+    })
+    const [pushed] = parseCommand('git -C /repo push origin v1.2.3')
+    expect(pushed).toMatchObject({ subcommand: 'push', ambiguous: false })
+    expect(pushed.refspecs).toContain('v1.2.3')
+  })
+})
+
+describe('tokenizer', () => {
+  it('splits on every unquoted operator and on newlines', () => {
+    const segs = parseCommand('a | b || c ; d && e\nf')
+    expect(segs.map((s) => s.verb)).toEqual(['a', 'b', 'c', 'd', 'e', 'f'])
+  })
+  it('keeps a quoted operator inside a single token', () => {
+    expect(parseCommand('echo "a | b"')[0].argv).toEqual(['echo', 'a | b'])
+  })
+  it('strips quotes but keeps their content intact', () => {
+    expect(parseCommand("git commit -m 'fix: a && b'")[0].argv).toContain('fix: a && b')
+  })
+  it('joins a backslash line continuation instead of splitting', () => {
+    const segs = parseCommand('git push \\\n origin main')
+    expect(segs).toHaveLength(1)
+    expect(segs[0].argv).toEqual(['git', 'push', 'origin', 'main'])
+  })
+  it('treats a redirection as a flag and its target as a path, never a refspec', () => {
+    const [s] = parseCommand('git push origin master > /tmp/out.log')
+    expect(s.refspecs).toEqual(['origin', 'master'])
+    expect(s.paths).toContain('/tmp/out.log')
+    expect(s.flags).toContain('>')
+  })
+  it('does not mistake an fd duplication for a path', () => {
+    const [s] = parseCommand('git push origin master 2>&1')
+    expect(s.refspecs).toEqual(['origin', 'master'])
+    expect(s.paths).toEqual([])
+  })
+  it('keeps the operator that ends a segment as a token', () => {
+    const segs = parseCommand('cd /repo && git push origin master')
+    expect(segs[0].argv).toEqual(['cd', '/repo', '&&'])
+    expect(segs[1].argv).toEqual(['git', 'push', 'origin', 'master'])
+  })
+  it('keeps an input redirect target out of the refspecs', () => {
+    const [s] = parseCommand('git push origin master < /tmp/in.txt')
+    expect(s.refspecs).toEqual(['origin', 'master'])
+    expect(s.paths).toContain('/tmp/in.txt')
+  })
+  it('does not treat a heredoc delimiter as a path', () => {
+    const [s] = parseCommand('cat > /tmp/x.md <<EOF\nhello\nEOF')
+    expect(s.paths).toContain('/tmp/x.md')
+    expect(s.paths).not.toContain('EOF')
+  })
+  it('keeps the original text in raw', () => {
+    const [s] = parseCommand('git push origin "feat/a"')
+    expect(s.raw).toBe('git push origin "feat/a"')
+  })
+  it('returns no segments for an empty command', () => {
+    expect(parseCommand('')).toEqual([])
+    expect(parseCommand('   \n ')).toEqual([])
+  })
+})
+
+describe('ambiguity is fail-closed', () => {
+  it('marks an expanded dollar in a token ambiguous', () => {
+    const segs = parseCommand('cd "$D" && git push origin HEAD')
+    expect(segs[0].ambiguous).toBe(true)
+  })
+  it('does not mark a single-quoted dollar ambiguous (no expansion happens)', () => {
+    expect(parseCommand("cd '$D'")[0].ambiguous).toBe(false)
+  })
+  it('does not mark an escaped dollar ambiguous', () => {
+    expect(parseCommand('echo \\$HOME')[0].ambiguous).toBe(false)
+  })
+  it('marks an opaque verb ambiguous whatever its arguments say', () => {
+    for (const verb of ['eval', 'exec', 'xargs']) {
+      expect(parseCommand(`${verb} git push origin main`)[0].ambiguous).toBe(true)
+    }
+  })
+  it('leaves a plain resolvable command unambiguous', () => {
+    expect(parseCommand('git push origin master')[0].ambiguous).toBe(false)
+  })
+  it('marks every segment ambiguous once the wrapper depth budget is spent', () => {
+    expect(parseCommand('git push origin master', MAX_WRAP_DEPTH)[0].ambiguous).toBe(true)
+    expect(parseCommand('git push origin master', MAX_WRAP_DEPTH - 1)[0].ambiguous).toBe(false)
+  })
+  // Fix round 1 — finding 2: backtick substitution runs a command exactly like
+  // `$(...)`, but only `$` set the expandable flag, so `` echo `git -C /repo push
+  // origin v1.2.3` `` was `ambiguous: false` with the real push invisible, and
+  // `` cd `pwd` `` looked like a resolved cd target.
+  it('marks a backtick command substitution ambiguous like $(...)', () => {
+    expect(parseCommand('cd `pwd`')[0].ambiguous).toBe(true)
+  })
+  it('marks a segment whose argument hides a command in backticks', () => {
+    expect(parseCommand('echo `git -C /repo push origin v1.2.3`')[0].ambiguous).toBe(true)
+  })
+  it('marks a double-quoted backtick ambiguous (substitution still happens there)', () => {
+    expect(parseCommand('echo "`pwd`"')[0].ambiguous).toBe(true)
+  })
+  it('does not mark a single-quoted backtick ambiguous (no expansion happens)', () => {
+    expect(parseCommand("echo '`pwd`'")[0].ambiguous).toBe(false)
+  })
+  it('does not mark an escaped backtick ambiguous', () => {
+    expect(parseCommand('echo \\`pwd\\`')[0].ambiguous).toBe(false)
+  })
+})
