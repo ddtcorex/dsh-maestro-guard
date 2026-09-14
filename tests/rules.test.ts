@@ -100,6 +100,74 @@ describe('classify — secret.access reads the parsed argv, not the stripped tex
   })
 })
 
+/**
+ * The 0.2.3 fail-open CRITICAL 2 closes: `verb = argv[0]` and every command rule
+ * keyed on an exact verb match, so a first token that cannot be a command — a
+ * `VAR=value` assignment, a `(`/`{` group opener, a shell keyword — or an
+ * exec-like wrapper the parser does not know hid the whole command. All of these
+ * were silently ALLOWED; they must reach the ambiguity escalation, which yields
+ * `ask` (as `git $GITS push …` already proved).
+ */
+describe('classify — a first token that cannot be a command escalates (never allows)', () => {
+  const pushShapes = [
+    'FOO=bar git push origin master',
+    'GIT_DIR=/x git push origin master',
+    '(git push origin master)',
+    '{ git push origin master; }',
+    'if true; then git push origin master; fi',
+    // exec-like wrappers the parser's verb tables do not name: the shape test
+    // catches them because a later token is a verb the rules resolve.
+    'perf git push origin master',
+    'valgrind git push origin master',
+    'eatmydata git push origin master',
+    'pkexec git push origin master',
+    'gosu app git push origin master',
+    'run0 git push origin master',
+    'firejail git push origin master',
+    'chpst git push origin master',
+    'sshpass -p x git push origin master',
+    'daemonize git push origin master',
+    'xvfb-run git push origin master',
+    'watchexec -e ts git push origin master',
+  ]
+  for (const command of pushShapes) {
+    it(`asks for the push hidden behind: ${command}`, () => {
+      expect(call(command)).toMatchObject({ ruleId: 'git.push.protected', tier: 'ask' })
+    })
+  }
+
+  const publishShapes = [
+    'FOO=bar pnpm publish',
+    '(npm publish)',
+    '{ yarn publish; }',
+    'if true; then npm publish; fi',
+    'pkexec pnpm publish',
+    'watchexec -e ts yarn publish',
+  ]
+  for (const command of publishShapes) {
+    it(`asks for the publish hidden behind: ${command}`, () => {
+      expect(call(command)).toMatchObject({ ruleId: 'pkg.publish', tier: 'ask' })
+    })
+  }
+
+  // Non-regression: the shape test must not turn ordinary commands into prompts.
+  const resolvedCommands = [
+    'ls -la',
+    'git status',
+    'git push origin feature/x',
+    'pnpm --dir packages/dsh-maestro-guard test',
+    'pnpm test',
+    'ssh host ls',
+    'echo hello',
+    'perf stat -e cycles ls',
+  ]
+  for (const command of resolvedCommands) {
+    it(`stays resolved (no spurious ask) for: ${command}`, () => {
+      expect(call(command).tier).toBe('allow')
+    })
+  }
+})
+
 describe('classify — fs.write.outside (whole write family, temp dir exempt)', () => {
   const outside = { file_path: '/etc/hosts' }
   it('asks when the native write tool targets a path outside cwd and outside tmpdir', () => {

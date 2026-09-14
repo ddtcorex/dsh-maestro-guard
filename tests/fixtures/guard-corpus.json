@@ -54,6 +54,24 @@
     "note": "A quoted cd target cannot be resolved and HEAD is implicit, so fail closed."
   },
   {
+    "name": "bypass: assignment-hidden push",
+    "tool": "bash",
+    "args": { "command": "FOO=bar git push origin master" },
+    "cwd": "/repo",
+    "expectedRule": "git.push.protected",
+    "expectedTier": "ask",
+    "note": "CRITICAL 2: `verb = argv[0]` read `FOO=bar` as the verb, so no command rule matched and the push was allowed. The parser now marks a segment whose first token cannot be a command as ambiguous, and ambiguity escalates to ask."
+  },
+  {
+    "name": "bypass: unknown-wrapper publish",
+    "tool": "bash",
+    "args": { "command": "pkexec pnpm publish" },
+    "cwd": "/repo",
+    "expectedRule": "pkg.publish",
+    "expectedTier": "ask",
+    "note": "Same shape, publish side: `pkexec` is an exec-like wrapper outside the parser's table, so a later token (`pnpm`) names the resolvable verb while argv[0] does not. A longer denylist of wrapper names cannot close this class — the shape test does."
+  },
+  {
     "name": "carried: publish behind a --filter VALUE",
     "tool": "bash",
     "args": { "command": "pnpm --filter run publish" },

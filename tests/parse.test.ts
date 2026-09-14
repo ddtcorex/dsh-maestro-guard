@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   parseCommand,
+  unwrapSegments,
   MAX_WRAP_DEPTH,
   extractCommandText,
   extractPathField,
@@ -331,5 +332,49 @@ describe('getCommandWorkingDir', () => {
   })
   it('returns undefined for a $VAR cd target', () => {
     expect(getCommandWorkingDir('cd $REPO_DIR && git push -u origin feat/x', '/work')).toBeUndefined()
+  })
+})
+
+/**
+ * CRITICAL 2 — the shape test that stops `verb = argv[0]` from hiding a whole
+ * command. A segment whose first token cannot be a command (a `VAR=value`
+ * assignment, a `(`/`{` group opener, a shell keyword), or whose later tokens
+ * name a verb the rules resolve while its first does not, is marked `ambiguous`
+ * so the rule layer escalates it to `ask` instead of allowing it.
+ *
+ * The mechanism is pinned here (the flag) and its OUTCOME in
+ * `tests/rules.test.ts` (the verdict), so a future change to either half fails
+ * loudly.
+ */
+describe('parseCommand — a first token that cannot be a command is ambiguous', () => {
+  const shapes = [
+    'FOO=bar git push origin master',
+    'GIT_DIR=/x git push origin master',
+    '(git push origin master)',
+    '{ git push origin master; }',
+    'then git push origin master',
+    'pkexec git push origin master',
+    'my-custom-runner git push origin master',
+  ]
+  for (const command of shapes) {
+    it(`flags ${command}`, () => {
+      expect(parseCommand(command).some((s) => s.ambiguous)).toBe(true)
+    })
+  }
+
+  it('does not flag a segment a known prefix verb still resolves', () => {
+    for (const command of ['sudo git push origin master', 'command git push origin master', 'env A=1 git push origin master']) {
+      expect(unwrapSegments(parseCommand(command))[0].ambiguous, command).toBe(false)
+    }
+  })
+
+  it('does not flag ordinary commands', () => {
+    // `ssh host ls` is deliberately absent: `ssh` is a known exec-like wrapper,
+    // so the parser DOES mark it ambiguous on the verb alone (pre-existing). Its
+    // outcome still stays allow — the escalation finds no rule shape in the raw
+    // text — and `tests/rules.test.ts` pins that at the classify level.
+    for (const command of ['ls -la', 'git status', 'pnpm test', 'echo hello']) {
+      expect(parseCommand(command).every((s) => !s.ambiguous), command).toBe(true)
+    }
   })
 })

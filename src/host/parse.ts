@@ -84,7 +84,6 @@ export interface Segment {
 
 /** Verbs whose meaning is entirely "run whatever the arguments say". */
 export const OPAQUE_VERBS = new Set(['eval', 'exec', 'xargs'])
-
 /**
  * Verbs that run a trailing COMMAND of their own — after their own options and,
  * for most of them, a leading duration/priority/pid argument. The verb the guard
@@ -110,23 +109,32 @@ export const OPAQUE_VERBS = new Set(['eval', 'exec', 'xargs'])
 export const EXEC_WRAPPERS = new Set([
   'bwrap',
   'caffeinate',
+  'chpst',
   'chroot',
   'chrt',
   'cpulimit',
+  'daemonize',
   'doas',
+  'eatmydata',
   'fakeroot',
+  'firejail',
   'flock',
+  'gosu',
   'ionice',
   'ltrace',
   'nice',
   'nsenter',
   'parallel',
+  'perf',
+  'pkexec',
+  'run0',
   'runuser',
   'script',
   'setarch',
   'setpriv',
   'setsid',
   'ssh',
+  'sshpass',
   'stdbuf',
   'strace',
   'su',
@@ -135,7 +143,10 @@ export const EXEC_WRAPPERS = new Set([
   'timeout',
   'unbuffer',
   'unshare',
+  'valgrind',
   'watch',
+  'watchexec',
+  'xvfb-run',
 ])
 
 /**
@@ -493,6 +504,62 @@ function subcommandIndex(toks: Tok[], verb: string | undefined): Subcommand {
   return { index: i < toks.length && toks[i].kind === 'word' ? i : -1, unknownOption }
 }
 
+/**
+ * Shell reserved words that can lead a segment without being the command it
+ * runs. The token after one of them is never that segment's command either, so
+ * a segment led by one cannot be resolved from its first word.
+ */
+const SHELL_KEYWORDS = new Set([
+  'if', 'then', 'else', 'elif', 'fi', 'while', 'until', 'do', 'done', 'for',
+  'case', 'esac', 'select', 'function', 'in', '!', '[[', ']]',
+])
+
+/** `VAR=value` — an assignment the shell evaluates before any command runs. */
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
+
+/**
+ * Verbs the rule layer resolves as a command's own first word. A segment whose
+ * first token cannot be a command (a `VAR=value` assignment, a `(`/`{` group
+ * opener, a shell keyword), or whose LATER tokens name one of these while its
+ * first does not, is a command the parser failed to resolve — not a mention.
+ *
+ * This is a SHAPE test on purpose. `verb = argv[0]` plus exact-verb rule matches
+ * meant `FOO=bar git push origin master`, `(git push origin master)`,
+ * `if true; then git push origin master; fi` and every exec-like wrapper outside
+ * the table (`pkexec git push origin master`) were silently ALLOWED, and a longer
+ * denylist of wrapper names cannot close that class — `my-custom-runner git push`
+ * has the same shape. Marking the segment `ambiguous` hands it to the rule
+ * layer's escalation, which asks, never allows.
+ */
+const RULE_VERBS = new Set(['git', 'gh', 'pnpm', 'npm', 'yarn', 'curl', 'wget', 'source', '.'])
+
+/** The verb without its directory (`/bin/git` → `git`). */
+function commandBase(text: string): string {
+  const cut = text.lastIndexOf('/')
+  return cut === -1 ? text : text.slice(cut + 1)
+}
+
+/**
+ * True when this segment's first token cannot be the command it claims to be, or
+ * when a later token names a verb the rules resolve while the first does not.
+ * See {@link RULE_VERBS} for why this is a shape test.
+ */
+function unresolvedCommand(toks: Tok[]): boolean {
+  const first = toks[0]
+  const firstWord = first !== undefined && first.kind === 'word' ? first.text : undefined
+  if (firstWord !== undefined) {
+    if (ASSIGNMENT.test(firstWord) || SHELL_KEYWORDS.has(firstWord)) return true
+    if (firstWord.startsWith('(') || firstWord.startsWith('{')) return true
+    // A known prefix verb (`env`, `sudo`, `nohup`, `time`, `command`, `busybox`)
+    // is stripped by `unwrapSegments`, which re-derives the segment afterwards.
+    // It must not make the raw reading look unresolved, or every `sudo git push`
+    // would be flagged ambiguous on the strength of the prefix alone.
+    const base = commandBase(firstWord)
+    if (RULE_VERBS.has(base) || PREFIX_VERBS.has(base)) return false
+  }
+  return toks.some((t, i) => i > 0 && t.kind === 'word' && RULE_VERBS.has(t.text))
+}
+
 function buildSegment(source: string, toks: Tok[], exhausted: boolean): Segment {
   const argv = toks.map((t) => t.text)
   const verb = argv[0]
@@ -514,6 +581,7 @@ function buildSegment(source: string, toks: Tok[], exhausted: boolean): Segment 
   const ambiguous =
     exhausted ||
     sub.unknownOption ||
+    unresolvedCommand(toks) ||
     toks.some((t) => t.expandable) ||
     (verb !== undefined && (OPAQUE_VERBS.has(verb) || EXEC_WRAPPERS.has(verb)))
   const words = toks.filter((t) => t.kind !== 'sep')
