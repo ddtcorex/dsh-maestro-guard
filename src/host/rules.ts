@@ -539,13 +539,18 @@ function mutatesGuardPath(seg: Segment, guardSpellings: string[]): boolean {
  *
  * `seg.heredoc` is never read: a heredoc body is data, not argv, so a body that
  * merely names a protected path stays quiet.
+ *
+ * The access VERB is read from the segment's command, never from the joined
+ * argv: a commit message or a PR body that merely writes the words "do not cat
+ * <path>" is text ABOUT the path, and testing the whole surface made it ask.
+ * The path detection stays over the argv, so quoting cannot hide a real access.
  */
 function isAccess(seg: Segment, protectedPaths: string[]): boolean {
   const verb = baseName(seg.verb)
   if (verb !== undefined && MENTION_VERBS.has(verb)) return false
   const argvSurface = seg.argv.join(' ')
   if (!isBlockedPath(argvSurface, protectedPaths)) return false
-  return seg.ambiguous || ACCESS_VERBS.test(argvSurface)
+  return seg.ambiguous || (verb !== undefined && ACCESS_VERBS.test(verb))
 }
 
 /**
