@@ -1,9 +1,9 @@
 packages:
   - .
+  - '../dsh-maestro-config-lib'
 allowBuilds:
   esbuild: true
 minimumReleaseAgeExclude:
-  - '@ddtcorex/dsh-maestro-config-lib@0.1.2'
   - '@deepseek-ai/cosmokit@1.8.3'
   - '@deepseek-ai/dsh-brand@0.1.2-alpha.2'
   - '@deepseek-ai/dsh-tools@0.1.2-alpha.2'
