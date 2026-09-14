@@ -217,6 +217,89 @@ describe('guard.tamper is scoped to edits, never to mentions', () => {
 })
 
 /**
+ * Fix wave after the scoped re-review — narrowing the deny tier to EDITS left a
+ * set of mutation SHAPES it no longer saw, because the mutation verb was not the
+ * segment's own verb: it sat behind an exec wrapper (`nice`/`timeout`/`flock`/
+ * `ssh`/`doas`/`xargs`/`eval`), inside the command `find -exec`/`-execdir`/`-ok`
+ * runs, inside a `-c` script handed to a shell, or behind a clobber redirect the
+ * tokenizer split at the `|`. Every one of them was an ALLOW — a wipe of the
+ * guard's own journal with no prompt — where the pre-fix build denied even the
+ * bare mention. `ln` (a symlink swap in place of the journal) joins the mutating
+ * verbs for the same reason.
+ *
+ * The other direction stays pinned: a mention-led read of the same path is still
+ * an allow, so the exemption that made the journal readable cannot be re-broken
+ * by this wave.
+ */
+describe('guard.tamper sees a mutation the segment verb does not name', () => {
+  const journalFile = settings.guardPaths.find((p) => p.endsWith('journal.jsonl')) ?? ''
+  const mountManifest = settings.guardPaths.find((p) => p.endsWith('package.json')) ?? ''
+  const settingsFile = settings.guardPaths.find((p) => p.endsWith('settings.json')) ?? ''
+
+  it('denies a mutation hidden behind an exec wrapper', () => {
+    for (const command of [
+      `nice rm -f ${journalFile}`,
+      `timeout 5 rm -f ${journalFile}`,
+      `flock /tmp/l rm -f ${journalFile}`,
+      `ssh host rm -f ${journalFile}`,
+      `doas rm -f ${journalFile}`,
+      `xargs rm -f ${journalFile}`,
+      `eval rm -f ${journalFile}`,
+      `nice truncate -s 0 ${settingsFile}`,
+    ]) {
+      expect(run('bash', { command }), command).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
+    }
+  })
+
+  it('denies a mutation inside a -c script the segment hands to a shell', () => {
+    for (const command of [
+      `timeout 5 bash -c "rm -f ${journalFile}"`,
+      `find . -exec bash -c "rm -f ${journalFile}" +`,
+      `find . -exec sh -c "mv ${journalFile} /tmp/x" +`,
+    ]) {
+      expect(run('bash', { command }), command).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
+    }
+  })
+
+  it('denies a mutation find hands to -exec, -execdir or -ok', () => {
+    for (const command of [
+      `find . -exec rm -f ${journalFile} +`,
+      `find . -execdir rm -f ${journalFile} +`,
+      `find . -ok rm -f ${journalFile} +`,
+      `find . -exec truncate -s 0 ${mountManifest} +`,
+    ]) {
+      expect(run('bash', { command }), command).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
+    }
+  })
+
+  it('denies an opaque verb whose target arrives through the pipeline', () => {
+    for (const command of [`echo ${journalFile} | xargs rm -f`, `cat ${journalFile} | xargs shred -u`]) {
+      expect(run('bash', { command }), command).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
+    }
+  })
+
+  it('denies a clobber redirect and a symlink swap', () => {
+    for (const command of [`echo x >| ${journalFile}`, `ln -sf /tmp/x ${journalFile}`, `ln -f /tmp/x ${settingsFile}`]) {
+      expect(run('bash', { command }), command).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
+    }
+  })
+
+  it('keeps a mention-led READ of the same path an allow', () => {
+    for (const command of [
+      `rg rm ${journalFile}`,
+      `grep -c rm ${journalFile}`,
+      `echo rm -f ${journalFile}`,
+      `timeout 5 cat ${journalFile}`,
+      `find . -exec cat ${journalFile} +`,
+      `find . -execdir sh -c "cat ${journalFile}" +`,
+      `xargs cat ${journalFile}`,
+    ]) {
+      expect(run('bash', { command }), command).toMatchObject({ tier: 'allow' })
+    }
+  })
+})
+
+/**
  * Item 5 of the precision follow-up — the raw-text tamper match only knew the
  * ABSOLUTE spelling, so a command that reached the guard config through `~` or
  * `$HOME` walked past it. Every spelling is derived from the same factories that

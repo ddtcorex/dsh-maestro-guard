@@ -218,11 +218,15 @@ interface Tok {
   heredocQuoted?: boolean
 }
 
-/** Read one redirection at `i`: `>`, `>>`, `<`, `<<`, `<<<`, `N>&M`, `&>`. */
+/** Read one redirection at `i`: `>`, `>>`, `>|`, `<`, `<<`, `<<<`, `N>&M`, `&>`. */
 function scanRedirect(input: string, i: number): { op: string; dup: boolean; next: number } {
   const c = input[i]
   let j = i + 1
   let op = c
+  // `>|` is the noclobber override and one operator, not a redirect followed by a
+  // pipe: splitting it moved the target into a segment of its own, so a clobber
+  // of the guard's journal reached no rule at all.
+  if (c === '>' && input[j] === '|') return { op: '>|', dup: false, next: j + 1 }
   if (input[j] === c && c !== '&') {
     op += c
     j++
@@ -539,9 +543,10 @@ const RULE_VERBS = new Set(['git', 'gh', 'pnpm', 'npm', 'yarn', 'curl', 'wget', 
  * for, not a command. They lead a segment whose later words name a rule verb
  * without running it, so the later-token shape test must not apply to them.
  *
- * `find` is the one verb here that CAN run a command — but only through
- * `-exec`, which {@link unresolvedCommand} treats separately. The set is
- * exported so the rule layer applies the same reading to a protected path.
+ * `find` is the one verb here that CAN run a command — but only through one of
+ * its action flags ({@link FIND_ACTION_FLAGS}), which {@link unresolvedCommand}
+ * treats separately. The set is exported so the rule layer applies the same
+ * reading to a protected path.
  */
 export const MENTION_VERBS = new Set([
   'grep',
@@ -560,6 +565,24 @@ export const MENTION_VERBS = new Set([
   'uniq',
   'jq',
 ])
+
+/**
+ * The `find` actions that really RUN the command they name (every other find
+ * predicate only tests the entry). `-exec` alone was recognized, so a protected
+ * push or a protected-path mutation under `-execdir`/`-ok`/`-okdir` reached no
+ * rule — the escalation found nothing and the call was allowed.
+ */
+export const FIND_ACTION_FLAGS = new Set(['-exec', '-execdir', '-ok', '-okdir'])
+
+/**
+ * A shell's "run this script text" switch (`-c`, `-lc`, `--command`). The token
+ * after it is a COMMAND LINE, not an argument: `bash -c "rm -f <path>"` hands the
+ * mutation to a shell, and `find -exec bash -c "…" +` hides it one level deeper.
+ */
+export const SHELL_COMMAND_FLAG = /^(?:-[A-Za-z]*c|--command)$/
+
+/** The shells that read `{@link SHELL_COMMAND_FLAG}`; a wrapper may hand them the script. */
+export const SHELL_VERBS = new Set(['ash', 'bash', 'busybox', 'dash', 'ksh', 'sh', 'zsh'])
 
 /** The verb without its directory (`/bin/git` → `git`). */
 function commandBase(text: string): string {
@@ -592,7 +615,7 @@ function unresolvedCommand(toks: Tok[]): boolean {
     const base = commandBase(firstWord)
     if (RULE_VERBS.has(base) || PREFIX_VERBS.has(base)) return false
     if (MENTION_VERBS.has(base)) {
-      return base === 'find' && toks.some((t) => t.kind === 'word' && t.text === '-exec')
+      return base === 'find' && toks.some((t) => t.kind === 'word' && FIND_ACTION_FLAGS.has(t.text))
     }
   }
   return toks.some((t, i) => i > 0 && t.kind === 'word' && RULE_VERBS.has(commandBase(t.text)))
