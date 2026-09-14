@@ -246,6 +246,37 @@ describe('classify — fs.write.outside (whole write family, temp dir exempt)', 
   })
 })
 
+/**
+ * PRECISION follow-up (the C2 residual) — `unresolvedCommand` compared a later
+ * token's TEXT, so a path-qualified verb walked past it, and a `-c` script handed
+ * to a shell by a verb the guard cannot name was never inspected. Both of these
+ * ALLOWED a protected push:
+ *
+ *   my-custom-runner /usr/bin/git push origin master
+ *   my-custom-runner bash -c "git push origin master"
+ */
+describe('classify — a path-qualified verb or a later shell -c cannot hide the command', () => {
+  it('asks for a push under a path-qualified git', () => {
+    expect(call('my-custom-runner /usr/bin/git push origin master')).toMatchObject({
+      ruleId: 'git.push.protected',
+      tier: 'ask',
+    })
+  })
+
+  it('asks for a push in a -c script handed to a shell by an unknown runner', () => {
+    expect(call('my-custom-runner bash -c "git push origin master"')).toMatchObject({
+      ruleId: 'git.push.protected',
+      tier: 'ask',
+    })
+    expect(call('my-custom-runner /bin/sh -c "pnpm publish"')).toMatchObject({ ruleId: 'pkg.publish', tier: 'ask' })
+  })
+
+  it('still allows the same runner around a harmless command', () => {
+    expect(call('my-custom-runner /usr/bin/ls -la').tier).toBe('allow')
+    expect(call('my-custom-runner bash -c "ls -la"').tier).toBe('allow')
+  })
+})
+
 describe('classify — guard.tamper is scoped to EDITS of the guard config', () => {
   // Assembled at runtime: no tool call ever carries the guard path contiguously.
   const guardPath = settings.guardPaths[0]

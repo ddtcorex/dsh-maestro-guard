@@ -595,7 +595,7 @@ function unresolvedCommand(toks: Tok[]): boolean {
       return base === 'find' && toks.some((t) => t.kind === 'word' && t.text === '-exec')
     }
   }
-  return toks.some((t, i) => i > 0 && t.kind === 'word' && RULE_VERBS.has(t.text))
+  return toks.some((t, i) => i > 0 && t.kind === 'word' && RULE_VERBS.has(commandBase(t.text)))
 }
 
 function buildSegment(source: string, toks: Tok[], exhausted: boolean): Segment {
@@ -945,6 +945,43 @@ function rebuild(seg: Segment, toks: Tok[], forced: boolean): Segment {
 }
 
 /**
+ * True when the guard has no reading for this verb at all: not a rule verb, not
+ * a mention-only verb, not a prefix, not an exec-like wrapper, not a shell. Only
+ * such a segment is re-read for a later `shell -c` script — a verb the guard DOES
+ * know is judged by its own rules and its own wrapper handling.
+ */
+function isUnknownVerb(verb: string): boolean {
+  const base = commandBase(verb)
+  return (
+    !RULE_VERBS.has(base) &&
+    !PREFIX_VERBS.has(base) &&
+    !MENTION_VERBS.has(base) &&
+    !SHELLS.has(base) &&
+    !OPAQUE_VERBS.has(base) &&
+    !EXEC_WRAPPERS.has(base)
+  )
+}
+
+/**
+ * The tokens from a SHELL that appears after the segment's own verb, when that
+ * shell carries a readable `-c` script: `my-custom-runner bash -c "git push
+ * origin master"`. The runner is opaque to the guard, but the script it hands to
+ * the shell is exactly what runs, so the shell invocation takes the place of the
+ * unreadable argument list (the caller feeds it through the same shell-wrapper
+ * path). Returns `undefined` when no later token is a shell with a `-c` script.
+ */
+function laterShellTokens(toks: Tok[]): Tok[] | undefined {
+  for (let i = 1; i < toks.length; i++) {
+    const t = toks[i]
+    if (t.kind !== 'word' || !SHELLS.has(commandBase(t.text))) continue
+    const rest = toks.slice(i)
+    const command = shellCommandArg(rest)
+    if (command.found && command.script !== undefined) return rest
+  }
+  return undefined
+}
+
+/**
  * Remove every wrapper around a parsed command and return the segments that
  * actually run.
  *
@@ -968,10 +1005,22 @@ export function unwrapSegments(segs: Segment[], depth = 0): Segment[] {
 function unwrapSegment(seg: Segment, depth: number): Segment[] {
   const toks = segmentTokens(seg)
   const stripped = stripPrefixes(toks)
-  const rest = stripped.toks
+  const declared =
+    stripped.toks[0] !== undefined && stripped.toks[0].kind === 'word' ? stripped.toks[0].text : undefined
+  // A verb the guard cannot name may still hand a `-c` script to a shell that
+  // appears later (`my-custom-runner bash -c "git push origin master"`): the
+  // script is what runs, so its shell invocation replaces the opaque argument
+  // list and is handled exactly like a shell-first segment.
+  const hidden =
+    declared !== undefined && !SHELLS.has(commandBase(declared)) && isUnknownVerb(declared)
+      ? laterShellTokens(stripped.toks)
+      : undefined
+  const rest = hidden ?? stripped.toks
   const verb = rest[0] !== undefined && rest[0].kind === 'word' ? rest[0].text : undefined
 
-  if (verb !== undefined && SHELLS.has(verb)) {
+  // The shell is read by its BASE name, so `/bin/bash -c …` is unwrapped exactly
+  // like `bash -c …` (the path-qualified form is the same command).
+  if (verb !== undefined && SHELLS.has(commandBase(verb))) {
     const command = shellCommandArg(rest)
     const script = command.found ? command.script : seg.heredoc
     if (script === undefined || depth >= MAX_WRAP_DEPTH) return [rebuild(seg, rest, true)]
