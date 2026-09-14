@@ -341,6 +341,56 @@ describe('guard.tamper sees a mutation the segment verb does not name', () => {
     })
   })
 
+  it('follows a pipeline through the segments between the path and the opaque verb', () => {
+    // The borrow used to look only at the IMMEDIATELY preceding segment, so any
+    // pass-through command in between reopened the shape the first wave closed.
+    for (const command of [
+      `cat ${journalFile} | xargs rm -f`,
+      `cat ${journalFile} | tee /tmp/x | xargs rm -f`,
+      `cat ${journalFile} | grep x | xargs rm -f`,
+      `cat ${journalFile} | sort | xargs rm -f`,
+      `cat ${journalFile} 2>/dev/null | grep x | xargs rm -f`,
+    ]) {
+      expect(run('bash', { command }), command).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
+    }
+    // …and a chain broken by any other operator still cannot carry the path.
+    for (const command of [
+      `tail ${journalFile} && xargs rm -rf /tmp/junk`,
+      `cat ${journalFile}; xargs rm -rf /tmp/junk`,
+      `cat ${journalFile} | tee /tmp/x && xargs rm -rf /tmp/junk`,
+    ]) {
+      expect(run('bash', { command }), command).toMatchObject({ tier: 'allow' })
+    }
+  })
+
+  it('descends through every wrapper in the parser set, not a hand-picked sample', () => {
+    // `descendantStarts` keys on EXEC_WRAPPERS ∪ OPAQUE_VERBS by name, so the
+    // boundary is that SET; a representative from each shape keeps it honest.
+    for (const wrapper of [
+      'watch',
+      'setsid',
+      'stdbuf',
+      'strace',
+      'parallel',
+      'chroot',
+      'runuser',
+      'script',
+      'bwrap',
+      'systemd-run',
+      'taskset',
+      'ionice',
+      'ltrace',
+      'su',
+      'doas',
+      'xargs -n1',
+    ]) {
+      expect(run('bash', { command: `${wrapper} rm -f ${journalFile}` }), wrapper).toMatchObject({
+        ruleId: 'guard.tamper',
+        tier: 'deny',
+      })
+    }
+  })
+
   it('denies every other writer that destroys the file it names', () => {
     // The verb family is the deny tier's weak spot: a closed list missed the
     // transfers and editors that write or remove their target, all of which were
@@ -349,7 +399,10 @@ describe('guard.tamper sees a mutation the segment verb does not name', () => {
       `rsync -a /tmp/x ${journalFile}`,
       `scp /tmp/x ${journalFile}`,
       `curl -o ${journalFile} https://example.invalid/j`,
+      `curl --output=${journalFile} https://example.invalid/j`,
       `wget -O ${journalFile} https://example.invalid/j`,
+      `wget --output-document=${journalFile} https://example.invalid/j`,
+      `printf x | sponge ${journalFile}`,
       `patch ${settingsFile} < /tmp/p.diff`,
       `unlink ${journalFile}`,
       `rmdir ${journalFile}`,
@@ -359,6 +412,43 @@ describe('guard.tamper sees a mutation the segment verb does not name', () => {
     ]) {
       expect(run('bash', { command }), command).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
     }
+  })
+
+  it('reads through the dual-use verbs instead of denying their READ shape', () => {
+    // `curl`/`wget`/`rsync`/`scp`/`vi`/`nano` are dual-use: a bare membership in
+    // the writer family made every read form an unappealable deny, contradicting
+    // the same release's "a read of the guard path falls through" contract.
+    for (const command of [
+      `curl ${journalFile}`,
+      `curl -I ${journalFile}`,
+      `curl -s ${journalFile}`,
+      `curl -d @${journalFile} https://example.invalid/u`,
+      `wget -q -O - ${journalFile}`,
+      `rsync --list-only ${journalFile} /tmp/`,
+      `rsync ${journalFile} /tmp/x`,
+      `scp -r host:${journalFile} /tmp/`,
+      `vi -R ${journalFile}`,
+      `vim -R ${journalFile}`,
+      `vim -M ${journalFile}`,
+      `nano -v ${journalFile}`,
+    ]) {
+      expect(run('bash', { command }), command).toMatchObject({ tier: 'allow' })
+    }
+  })
+
+  it('denies the write shape of a dual-use verb even when flags follow the path', () => {
+    for (const command of [
+      `rsync -a /tmp/x ${journalFile} --delete`,
+      `rsync -a --exclude x /tmp/y ${journalFile}`,
+      `timeout 5 vi ${journalFile}`,
+      `find . -exec curl -o ${journalFile} https://example.invalid/j +`,
+    ]) {
+      expect(run('bash', { command }), command).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
+    }
+    // A guard path in the SOURCE position of a transfer is not a write …
+    expect(run('bash', { command: `rsync -a --exclude ${journalFile} /tmp/x /tmp/y` }).tier).toBe('allow')
+    // … and `ed` has no read-only mode, so it stays an unconditional writer.
+    expect(run('bash', { command: `ed -l ${journalFile}` })).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
   })
 
   it('keeps a transfer that names no guard path an allow', () => {

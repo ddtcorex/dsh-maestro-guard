@@ -128,23 +128,31 @@ const MUTATION_VERBS = new Set([
   'install',
   'chmod',
   'chown',
-  // Transfers and in-place writers that destroy or replace the file they name.
-  // The family is closed and cannot be complete (an unknown runner around a
-  // mutating verb, or `git restore`, is not covered); the deliberate members are
-  // the ones whose target is lexically obvious.
-  'rsync',
-  'scp',
-  'curl',
-  'wget',
+  // Writers with no read form: a transfer that overwrites its target, an in-place
+  // patcher, a source-soaking filter, a remover.
   'patch',
   'sponge',
   'unlink',
   'rmdir',
+  // GNU `ed` has no read-only mode — any invocation that names a file opens it
+  // for editing — so it belongs with the unconditional writers, not the shapes.
   'ed',
-  'vi',
-  'vim',
-  'nano',
 ])
+/**
+ * Verbs that write ONLY in their write shape, and whose other forms read the very
+ * path they name. A bare membership in {@link MUTATION_VERBS} made every read form
+ * of these an unappealable deny (`curl -I <journal>`, `wget -O - <journal>`,
+ * `rsync --list-only <journal> /tmp/`, `vi -R <journal>`), which contradicts the
+ * denial tier's own contract that a read falls through; {@link writesByShape}
+ * decides each one from its flags and operands.
+ */
+const SHAPE_WRITERS = new Set(['curl', 'wget', 'rsync', 'scp', 'vi', 'vim', 'nano'])
+/** The read-only forms of the shape writers, per verb (`-v` means Ex mode in vim). */
+const READ_ONLY_FLAGS: Record<string, ReadonlySet<string>> = {
+  vi: new Set(['-R', '-M', '--readonly']),
+  vim: new Set(['-R', '-M', '--readonly']),
+  nano: new Set(['-v', '--view']),
+}
 /** Editors that write only when their in-place switch is present. */
 const IN_PLACE_EDITORS = new Set(['sed', 'perl'])
 /** `-i`, `-ni`, `-i.bak`, `--in-place` — the in-place switch of those editors. */
@@ -572,7 +580,7 @@ function mutatesGuardPath(seg: Segment, names: (text: string) => boolean, pipedF
     verb !== undefined &&
     OPAQUE_VERBS.has(verb) &&
     !ignoresPipedInput(seg.argv, verb) &&
-    seg.argv.some((_, i) => isMutationWord(seg.argv, i))
+    seg.argv.some((_, i) => isMutationWord(seg.argv, i, names))
   )
 }
 
@@ -580,12 +588,89 @@ function mutatesGuardPath(seg: Segment, names: (text: string) => boolean, pipedF
 function writesSurface(argv: string[], names: (text: string) => boolean): boolean {
   if (!argv.some(names)) return false
   const verb = baseName(argv[0] ?? '')
-  if (verb !== undefined && MUTATION_VERBS.has(verb)) return true
-  if (verb !== undefined && IN_PLACE_EDITORS.has(verb) && argv.some((f) => IN_PLACE_FLAG.test(f))) return true
+  if (verb !== undefined && writesOwnTarget(verb, argv, names)) return true
   for (const start of descendantStarts(argv, verb)) {
-    if (argv.slice(start).some((_, k) => isMutationWord(argv, start + k))) return true
+    if (argv.slice(start).some((_, k) => isMutationWord(argv, start + k, names))) return true
   }
   return argv.some((word, i) => WRITE_REDIRECT.test(word) && i + 1 < argv.length && names(argv[i + 1]))
+}
+
+/**
+ * True when the verb leading `argv` writes a path {@link names} matches.
+ *
+ * A mutating verb always does; an in-place editor does when its flag is present;
+ * a {@link SHAPE_WRITERS} member only in the form that writes (`curl -o <path>`,
+ * `wget -O <path>`, a `rsync`/`scp` DESTINATION, an editor without its read-only
+ * switch).
+ */
+function writesOwnTarget(verb: string, argv: string[], names: (text: string) => boolean): boolean {
+  if (MUTATION_VERBS.has(verb)) return true
+  if (IN_PLACE_EDITORS.has(verb) && argv.some((f) => IN_PLACE_FLAG.test(f))) return true
+  return writesByShape(verb, argv, names)
+}
+
+/** True when `argv[i]` starts a writer whose target in this command is a guard path. */
+function isMutationWord(argv: string[], i: number, names: (text: string) => boolean): boolean {
+  const base = baseName(argv[i] ?? '')
+  if (base === undefined) return false
+  return writesOwnTarget(base, argv.slice(i), names)
+}
+
+/**
+ * The write shape of a {@link SHAPE_WRITERS} verb, read from the command it leads
+ * (`tail[0]` is the verb itself). Reads are decided here rather than by the verb
+ * alone: `curl -I`, `wget -O -`, `rsync --list-only <path> <dir>`, `scp host:<path>
+> /tmp/`, `vi -R` and `nano -v` all name a guard path without writing it.
+ */
+function writesByShape(verb: string, tail: string[], names: (text: string) => boolean): boolean {
+  // A `find … -exec CMD … +` tail carries the action terminator, not an operand.
+  let end = tail.length
+  while (end > 1 && (tail[end - 1] === '+' || tail[end - 1] === ';')) end--
+  const words = tail.slice(1, end)
+  switch (verb) {
+    case 'curl':
+      return outputFlagTargets(words, ['-o', '--output'], names)
+    case 'wget':
+      return outputFlagTargets(words, ['-O', '--output-document'], names)
+    case 'rsync':
+    case 'scp': {
+      // The destination is every operand but the FIRST: a guard path in source
+      // position is being read out (`rsync --list-only <journal> /tmp/`), while
+      // one anywhere after it is where the transfer lands. `--exclude <path>` is
+      // covered by the same rule because it would be the first operand.
+      const operands = words.filter((w) => !w.startsWith('-'))
+      return operands.slice(1).some(names)
+    }
+    case 'vi':
+    case 'vim':
+    case 'nano': {
+      const readOnly = READ_ONLY_FLAGS[verb] ?? new Set<string>()
+      if (words.some((w) => readOnly.has(w))) return false
+      return words.some((w) => !w.startsWith('-') && names(w))
+    }
+    default:
+      return false
+  }
+}
+
+/** True when an output flag's value is a guard path (`-o <path>`, `-o<path>`, `--output=<path>`). */
+function outputFlagTargets(words: string[], flags: string[], names: (text: string) => boolean): boolean {
+  for (let i = 0; i < words.length; i++) {
+    const flag = words[i] ?? ''
+    const long = flags.find((f) => f.startsWith('--') && flag.startsWith(`${f}=`))
+    if (long !== undefined) {
+      if (names(flag.slice(long.length + 1))) return true
+      continue
+    }
+    if (!flags.includes(flag)) {
+      const short = flags.find((f) => !f.startsWith('--') && flag.startsWith(f) && flag.length > f.length)
+      if (short !== undefined && names(flag.slice(short.length))) return true
+      continue
+    }
+    const next = words[i + 1]
+    if (next !== undefined && names(next)) return true
+  }
+  return false
 }
 
 /**
@@ -608,14 +693,6 @@ function descendantStarts(argv: string[], verb: string | undefined): number[] {
   return out
 }
 
-/** True when `argv[i]` is a mutation verb, or an in-place editor carrying its flag. */
-function isMutationWord(argv: string[], i: number): boolean {
-  const base = baseName(argv[i] ?? '')
-  if (base === undefined) return false
-  if (MUTATION_VERBS.has(base)) return true
-  return IN_PLACE_EDITORS.has(base) && argv.slice(i + 1).some((f) => IN_PLACE_FLAG.test(f))
-}
-
 /**
  * True when the piped input never reaches the command `argv[0]` runs, so the path
  * named upstream cannot be that command's target.
@@ -625,6 +702,12 @@ function isMutationWord(argv: string[], i: number): boolean {
  * `/tmp/junk` and never names the journal, so denying it would be a false deny on
  * an unappealable tier. `eval` and `exec` do not turn stdin into argv at all, so
  * for them the borrowed target is never real either.
+ *
+ * The test is deliberately the weaker "the placeholder appears ANYWHERE in the
+ * command", not "the placeholder is the target": `xargs -I{} rm -rf /tmp/{}` denies,
+ * because the path the substitution builds is not the path the pipeline named and
+ * the guard does not track operand positions. Weaker here means fail-closed, which
+ * is the direction this tier must err in.
  */
 function ignoresPipedInput(argv: string[], verb: string): boolean {
   if (verb !== 'xargs') return true
@@ -727,8 +810,16 @@ export function classify(ctx: ClassifyContext): Verdict {
   // as the previous segment's last token, so `&&`/`;`/`||` cannot borrow a path.
   const namesGuardPath = (text: string) => guardSpellings.some((p) => text.includes(p))
   const pipedFromGuardPath = (i: number) => {
-    const prev = segs[i - 1]
-    return prev !== undefined && prev.argv[prev.argv.length - 1] === '|' && prev.argv.some(namesGuardPath)
+    // Walk LEFT while the chain is still one pipeline: the operator carrying a
+    // segment's stdout is kept as its last argv token, so the first segment in that
+    // chain to name a guard path proves the path reaches this one — however many
+    // pass-through commands (`tee`, `grep`, `sort`) sit between them.
+    for (let k = i - 1; k >= 0; k--) {
+      const prev = segs[k]
+      if (prev === undefined || prev.argv[prev.argv.length - 1] !== '|') return false
+      if (prev.argv.some(namesGuardPath)) return true
+    }
+    return false
   }
 
   // guard.tamper — highest priority, never approvable, scoped to EDITS (above).

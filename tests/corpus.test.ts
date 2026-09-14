@@ -325,6 +325,41 @@ const builtRows: CorpusRow[] = [
       'Documented ruling: `touch` changes mtime and destroys no content, and an empty config loads as the '
       + 'built-in defaults, so it does not meet "edits the config or truncates/removes the journal".',
   },
+  {
+    name: 'guard.tamper: mutation reached through a longer pipeline',
+    tool: 'bash',
+    args: { command: `cat ${GUARD_JOURNAL} | grep x | xargs rm -f` },
+    cwd: '/repo',
+    expectedRule: 'guard.tamper',
+    expectedTier: 'deny',
+    note:
+      'The borrow looked only at the segment IMMEDIATELY before the opaque verb, so one pass-through '
+      + 'command between the path and the deleting verb reopened the shape the first wave closed. The '
+      + 'chain is walked now, and it stops at any operator that is not a pipe.',
+  },
+  {
+    name: 'over-block to keep fixed: the read shape of a dual-use verb',
+    tool: 'bash',
+    args: { command: `rsync --list-only ${GUARD_JOURNAL} /tmp/` },
+    cwd: '/repo',
+    expectedRule: '',
+    expectedTier: 'allow',
+    note:
+      'A bare membership in the writer family made every read form of `curl`/`wget`/`rsync`/`scp`/`vi`/'
+      + '`nano` an unappealable deny, contradicting "a read of the guard path falls through". The write '
+      + 'SHAPE decides: a destination operand, an output flag or an editor without its read-only switch.',
+  },
+  {
+    name: 'guard.tamper: the write shape of the same dual-use verb',
+    tool: 'bash',
+    args: { command: `rsync -a /tmp/x ${GUARD_JOURNAL} --delete` },
+    cwd: '/repo',
+    expectedRule: 'guard.tamper',
+    expectedTier: 'deny',
+    note:
+      'The same verb in destination position, with a flag after the path — the shape test reads operands, '
+      + 'not the last token, so a trailing flag cannot hide the target.',
+  },
 ]
 
 const allRows = [...corpus, ...builtRows]
