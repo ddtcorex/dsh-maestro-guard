@@ -4,6 +4,29 @@ All notable changes to this project are documented in this file. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-09-14
+
+### Changed
+- Blocked operations now raise DSH's native approval prompt: the guard calls
+  `approval.request()` itself and maps the outcome to allow-once or deny. The agent-mediated
+  ticket flow and the `maestro_guard_approve` tool are removed, so no agent can grant itself a
+  protected operation.
+- Decision rules are identified by id (`git.push.protected`, `pkg.publish`, `secret.access`, …)
+  and each rule's tier is overridable from `domains.guard.rules`.
+- `gh pr merge` is recorded in the journal instead of being gated (`journal` tier).
+- Credential scanning no longer reads tool *content*: only the executing command surface and a
+  file tool's path field are inspected, which removes the mention-vs-access false positives.
+- Secret redaction now applies to journal copies only and never rewrites the executed call;
+  the pattern set covers registry tokens, env assignments, auth headers and private keys.
+- Fail-closed by construction: a session whose approval policy never prompts is denied with an
+  actionable message.
+
+### Added
+- `~/.dsh/dsh-maestro-guard/journal.jsonl` — durable per-decision record.
+### Removed
+- `pending.json` ticket store, the approve/list tools and the unused approval store. A legacy
+  ticket file is retired to `legacy-pending.json` on first boot.
+
 ## [0.2.3] - 2026-09-04
 
 ### Fixed

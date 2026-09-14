@@ -18,6 +18,32 @@ describe('journal', () => {
     expect((await stat(journalPath(dir))).mode & 0o777).toBe(0o600)
   })
 
+  it('redacts every string field of the stored line, not just the reason', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'j-'))
+    // Assembled from fragments on purpose: no raw secret literal is ever
+    // written into this test file.
+    const registryToken = ['gl', 'pat', '-', 'AbCdEfGhIjKlMnOpQrSt'].join('')
+    const envAssignment = ['DEPLOY', '_TOKEN', '=', 'supersecretvalue'].join('')
+    const j = new Journal(dir, () => 1_700_000_000_000)
+    await j.append({
+      session: 's1', tool: 'bash', rule: 'secret.access', tier: 'deny',
+      target: `curl -H 'PRIVATE-TOKEN: ${registryToken}' https://git.example/api`,
+      repo: envAssignment, branch: 'main', cwd: '/tmp/work',
+      note: `credential surface: ${registryToken}`, outcome: 'denied',
+    })
+    const raw = await readFile(journalPath(dir), 'utf8')
+    expect(raw).not.toContain(registryToken)
+    expect(raw).not.toContain('supersecretvalue')
+    expect(raw).toContain('[REDACTED]')
+    const line = JSON.parse(raw.trim())
+    expect(line.target).not.toContain(registryToken)
+    expect(line.repo).not.toContain('supersecretvalue')
+    expect(line.note).not.toContain(registryToken)
+    // The readable part of a prefix-keeping pattern survives; only the value goes.
+    expect(line.repo).toBe(['DEPLOY', '_TOKEN=[REDACTED]'].join(''))
+    expect(line.redacted).toBe(true)
+  })
+
   it('never throws when the journal location is unusable', async () => {
     const base = await mkdtemp(join(tmpdir(), 'j-'))
     // A REGULAR FILE where the journal directory must go: mkdir(dirname(p), { recursive: true })

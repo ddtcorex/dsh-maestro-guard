@@ -295,7 +295,10 @@ export interface CheckSandboxOpts {
  * @param args tool arguments (object, string, or unknown)
  * @param opts.cwd session cwd (exec.agent.session.header.cwd)
  * @param opts.currentBranch git current branch (from getCurrentBranch)
- * @param opts.approved whether publish/git is APPROVED (via ApprovalStore)
+ * @param opts.approved whether publish/git is already approved. It is injected by a caller: this
+ *   helper is retained for the injected-approval contract and the test suites, while the live
+ *   pipeline decides in `createGuardHandler` via `classify`/`decide` — do not assume `checkSandbox`
+ *   is on the hot path.
  * @param opts.credentialPaths additional blocked credential paths from guard config
  * @param opts.gitProtection git protection toggle + branches from guard config
  * @param opts.publishBlocked whether publish is blocked (default true)
