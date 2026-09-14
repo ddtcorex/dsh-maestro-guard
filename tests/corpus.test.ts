@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { classify, RULE_IDS } from '../src/host/rules.js'
 import { decide } from '../src/host/decide.js'
+import { DEFAULT_CONFIG } from '../src/host/config.js'
 import { defaultProtectedPaths, guardConfigPaths } from '../src/host/paths.js'
 
 /**
@@ -38,6 +39,14 @@ const settings = {
   guardPaths: guardConfigPaths(DSH_HOME),
 }
 
+/**
+ * The verdict the HANDLER would enforce, driven through the SAME decision call
+ * `src/host/index.ts` makes: `decide(verdict, cfg.rules)`, where `cfg.rules` is
+ * the fully-populated table `DEFAULT_CONFIG` carries. Asserting through
+ * `decide(v, {})` — a shape no production code uses — hid a real regression: a
+ * dry run classifies as `journal`, but the default table's `pkg.publish: ask`
+ * entry used to win, so production asked for it while this corpus said journal.
+ */
 function verdictOf(row: CorpusRow): { ruleId: string; tier: string } {
   const v = classify({
     tool: row.tool,
@@ -46,7 +55,7 @@ function verdictOf(row: CorpusRow): { ruleId: string; tier: string } {
     settings,
     branchOf: () => row.branch ?? 'feature',
   })
-  return { ruleId: v.ruleId, tier: decide(v, {}).tier }
+  return { ruleId: v.ruleId, tier: decide(v, DEFAULT_CONFIG.rules).tier }
 }
 
 /**
@@ -57,6 +66,7 @@ function verdictOf(row: CorpusRow): { ruleId: string; tier: string } {
  */
 const CREDENTIAL_FILE = defaultProtectedPaths(DSH_HOME)[0]
 const GUARD_SETTINGS = guardConfigPaths(DSH_HOME)[0]
+const GUARD_JOURNAL = guardConfigPaths(DSH_HOME).find((p) => p.endsWith('journal.jsonl')) ?? ''
 
 const builtRows: CorpusRow[] = [
   {
@@ -76,6 +86,27 @@ const builtRows: CorpusRow[] = [
     expectedRule: 'guard.tamper',
     expectedTier: 'deny',
     note: 'The only deny rule: self-protection cannot be downgraded by configuration.',
+  },
+  {
+    name: 'protected path: journal truncate',
+    tool: 'bash',
+    args: { command: `: > ${GUARD_JOURNAL}` },
+    cwd: '/repo',
+    expectedRule: 'guard.tamper',
+    expectedTier: 'deny',
+    note:
+      'IMPORTANT 4 — the spec\'s deny tier covers "truncates/removes the journal", but only the '
+      + 'settings file and the profile patch were tamper paths, so wiping the audit trail classified as '
+      + 'allow. The journal and the retired legacy ticket file are tamper paths now.',
+  },
+  {
+    name: 'protected path: journal removal',
+    tool: 'bash',
+    args: { command: `rm -f ${GUARD_JOURNAL}` },
+    cwd: '/repo',
+    expectedRule: 'guard.tamper',
+    expectedTier: 'deny',
+    note: 'Same class as the truncate row: removing the record of what the guard decided is tampering.',
   },
   {
     name: 'containment: write outside the session cwd',

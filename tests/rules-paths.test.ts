@@ -118,3 +118,39 @@ describe('workingDirContainment', () => {
     expect(withContainment({ file_path: join(tmpdir(), 'scratch-notes.md'), content: 'x' }, { spillReads: false }).tier).toBe('allow')
   })
 })
+
+/**
+ * IMPORTANT 4 — the spec's `guard.tamper` deny tier covers "truncates/removes the
+ * journal", but the tamper path set held only the settings file and the profile
+ * patch, so `: > <journal>` and `rm <journal>` were allowed. The journal path (and
+ * the retired legacy ticket file beside it) are now tamper paths, as is the
+ * profile `package.json` that actually MOUNTS the guard row.
+ */
+describe('guard.tamper protects the journal and the mounting manifest', () => {
+  const journalFile = settings.guardPaths.find((p) => p.endsWith('journal.jsonl')) ?? ''
+  const legacyTicket = settings.guardPaths.find((p) => p.endsWith('legacy-pending.json')) ?? ''
+  const mountManifest = settings.guardPaths.find((p) => p.endsWith('package.json')) ?? ''
+
+  it('denies truncating, removing or rotating away the journal', () => {
+    for (const command of [`: > ${journalFile}`, `rm -f ${journalFile}`, `truncate -s 0 ${journalFile}`]) {
+      expect(run('bash', { command }), command).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
+    }
+  })
+
+  it('denies removing the retired legacy ticket file', () => {
+    expect(run('bash', { command: `rm -f ${legacyTicket}` })).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
+  })
+
+  it('denies a write-family tool targeting the profile package.json that mounts the guard', () => {
+    expect(run('write', { file_path: mountManifest, content: '{}' })).toMatchObject({
+      ruleId: 'guard.tamper',
+      tier: 'deny',
+    })
+  })
+
+  it('exposes exactly the tamper paths it protects', () => {
+    expect(journalFile).not.toBe('')
+    expect(legacyTicket).not.toBe('')
+    expect(mountManifest).not.toBe('')
+  })
+})

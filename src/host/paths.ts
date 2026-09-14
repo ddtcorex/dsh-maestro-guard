@@ -1,5 +1,6 @@
 import { homedir, tmpdir } from 'node:os'
 import { join, resolve, normalize } from 'node:path'
+import { journalDir, journalPath } from './journal.js'
 
 /**
  * Path rules: the always-blocked credential locations, the guard's own
@@ -66,12 +67,28 @@ export function defaultProtectedPaths(dshHome?: string): string[] {
  * The guard's own configuration files. A write to any of them is a tamper
  * attempt (`guard.tamper`, tier `deny`) — the classifier compares the raw
  * command text and the tool's path field against this list.
+ *
+ * Four families, all of them things whose edit silently changes what runs or
+ * erases what already ran:
+ *
+ * 1. `settings.json` — the `domains.guard` document itself;
+ * 2. `profiles/web/cordis.patch.yml` — the row patch that configures the guard;
+ * 3. `profiles/web/package.json` — the profile manifest that actually MOUNTS the
+ *    guard (`@ddtcorex/dsh-maestro-guard` sits in its `dependencies` as a
+ *    `link:`); the `cordis.patch.yml` beside it is a different file, and
+ *    rewriting either one redirects or disables the guard on the next boot;
+ * 4. the journal and the legacy ticket file beside it (`journalDir()`), because
+ *    the spec's deny tier covers an attempt to truncate or remove the guard's
+ *    own audit trail — an unlogged decision is not a lesser tamper.
  */
 export function guardConfigPaths(dshHome?: string): string[] {
   const home = resolveHome(dshHome)
   return [
     join(home, 'dsh-maestro-config', 'settings.json'),
     join(home, 'profiles', 'web', 'cordis.patch.yml'),
+    join(home, 'profiles', 'web', 'package.json'),
+    journalPath(dshHome),
+    join(journalDir(dshHome), 'legacy-pending.json'),
   ]
 }
 

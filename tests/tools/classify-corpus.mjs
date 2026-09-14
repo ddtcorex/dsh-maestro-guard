@@ -69,6 +69,7 @@ const rulesUrl = pathToFileURL(rulesArg === undefined ? join(pkgRoot, 'lib', 'ru
 
 const { classify } = await import(rulesUrl)
 const { decide } = await import(new URL('./decide.js', rulesUrl).href)
+const { DEFAULT_CONFIG } = await import(new URL('./config.js', rulesUrl).href)
 const { defaultProtectedPaths, guardConfigPaths } = await import(new URL('./paths.js', rulesUrl).href)
 
 // Mirrors tests/corpus.test.ts: a fixed DSH home and a branch reader that
@@ -94,7 +95,10 @@ for (const row of rows) {
     settings,
     branchOf: () => row.branch ?? 'feature',
   })
-  const tier = decide(v, {}).tier
+  // The SAME decision call the handler makes (`decide(v, cfg.rules)`), with the
+  // fully-populated default table. `decide(v, {})` was a shape no production
+  // code used and hid the `--dry-run` regression.
+  const tier = decide(v, DEFAULT_CONFIG.rules).tier
   const got = `${v.ruleId || 'allow'}/${tier}`
   const want = `${row.expectedRule || 'allow'}/${row.expectedTier}`
   const ok = got === want
