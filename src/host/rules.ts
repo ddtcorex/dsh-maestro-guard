@@ -128,6 +128,22 @@ const MUTATION_VERBS = new Set([
   'install',
   'chmod',
   'chown',
+  // Transfers and in-place writers that destroy or replace the file they name.
+  // The family is closed and cannot be complete (an unknown runner around a
+  // mutating verb, or `git restore`, is not covered); the deliberate members are
+  // the ones whose target is lexically obvious.
+  'rsync',
+  'scp',
+  'curl',
+  'wget',
+  'patch',
+  'sponge',
+  'unlink',
+  'rmdir',
+  'ed',
+  'vi',
+  'vim',
+  'nano',
 ])
 /** Editors that write only when their in-place switch is present. */
 const IN_PLACE_EDITORS = new Set(['sed', 'perl'])
@@ -522,32 +538,40 @@ function guardPathMatchers(guardPaths: string[]): string[] {
  * Every surface is `argv`, where quotes are already gone and their content kept,
  * so a quoted path cannot hide a mutation — and where a quoted MENTION
  * (`git commit -m "rm -f <journal>"`) stays a single data token, so it cannot
- * fake one. A mutation WORD is therefore only read at a position that is a
- * command: a segment led by a mention verb is scanned after a `find` action flag
- * only, so `rg rm <journal>` stays the read it is.
+ * fake one. A mutation WORD is therefore only read at a position that IS a
+ * command: the whole argv for the parser's own "runs a trailing command" class
+ * ({@link EXEC_WRAPPERS} ∪ {@link OPAQUE_VERBS}), and the tokens after a `find`
+ * action flag for a mention-led segment. Every other segment — `less -p rm
+ * <journal>`, `ag rm <journal>`, `docker rm <journal>` — is judged on its own
+ * verb only, so a mutation word in its arguments stays the data it is.
  *
- * A recorded trade-off: an interpreter inline program (`python -c "open(p,'w')"`)
- * is NOT a mutation here. The guard does not interpret the program's language,
- * and the shape is lexically indistinguishable from the `node -e "… mention …"`
- * allow case. The deny tier therefore covers the mutation shapes the parser can
- * prove; see the module's `rawSurface` note for the same choice on shape rules.
+ * Two recorded trade-offs. An interpreter inline program
+ * (`python -c "open(p,'w')"`) is NOT a mutation here: the guard does not interpret
+ * the program's language, and the shape is lexically indistinguishable from the
+ * `node -e "… mention …"` allow case. And an UNKNOWN runner around a mutating verb
+ * (`my-custom-runner rm -f <journal>`) is not read either, because nothing
+ * distinguishes it from a tool whose argument merely spells `rm` (`ag rm <journal>`).
+ * The deny tier therefore covers the mutation shapes the parser can prove; see the
+ * module's `rawSurface` note for the same choice on shape rules.
  */
-function mutatesGuardPath(seg: Segment, names: (text: string) => boolean, commandNamesGuardPath: boolean, depth = 0): boolean {
+function mutatesGuardPath(seg: Segment, names: (text: string) => boolean, pipedFromGuardPath: boolean, depth = 0): boolean {
   if (writesSurface(seg.argv, names)) return true
   if (depth < 2) {
     for (const script of scriptSegments(seg)) {
-      if (mutatesGuardPath(script, names, commandNamesGuardPath, depth + 1)) return true
+      if (mutatesGuardPath(script, names, pipedFromGuardPath, depth + 1)) return true
     }
   }
-  // An OPAQUE verb runs whatever its arguments say, and takes its target from
-  // somewhere else entirely (`echo <journal> | xargs rm -f`): the path is named in
-  // another segment of the pipeline, so the whole command decides.
+  // An OPAQUE verb runs whatever its arguments say, and xargs takes its target
+  // from the segment PIPED into it (`echo <journal> | xargs rm -f`), where the
+  // path is named and the mutation verb is not. Only a real pipe carries it: an
+  // `&&`/`;`/`||` sibling does not, and `eval`/`exec` never read stdin as argv.
   const verb = baseName(seg.verb)
   return (
     !seg.argv.some(names) &&
-    commandNamesGuardPath &&
+    pipedFromGuardPath &&
     verb !== undefined &&
     OPAQUE_VERBS.has(verb) &&
+    !ignoresPipedInput(seg.argv, verb) &&
     seg.argv.some((_, i) => isMutationWord(seg.argv, i))
   )
 }
@@ -565,17 +589,21 @@ function writesSurface(argv: string[], names: (text: string) => boolean): boolea
 }
 
 /**
- * The argv index a DESCENDANT command can start at. A segment whose verb is not a
- * mention verb runs what follows it, so the whole token list is in play (the verb
- * itself included — `rm -f <path>` is caught by the direct test, but `nice` and
- * friends are wrappers the parser marks `ambiguous` rather than unwrapping). A
- * mention-led segment only hands a command over through a `find` action flag.
+ * The argv index a DESCENDANT command can start at, over exactly the verbs whose
+ * grammar is "run what follows me": the exec wrappers the parser deliberately does
+ * not unwrap (`nice`, `timeout`, `flock`, `ssh`, `watch`, …) and the opaque ones
+ * (`xargs`, `eval`, `exec`). A plain verb — including a mention verb, a real tool
+ * the guard does not know (`ag`, `docker`, `my-custom-runner`) — hands nothing over
+ * through its own argv, so it gets no range here; a mention verb still hands one
+ * over through a `find` action flag.
  */
 function descendantStarts(argv: string[], verb: string | undefined): number[] {
-  if (verb === undefined || !MENTION_VERBS.has(verb)) return [0]
   const out: number[] = []
-  for (let i = 0; i < argv.length; i++) {
-    if (FIND_ACTION_FLAGS.has(argv[i])) out.push(i + 1)
+  if (verb !== undefined && (EXEC_WRAPPERS.has(verb) || OPAQUE_VERBS.has(verb))) out.push(0)
+  if (verb !== undefined && MENTION_VERBS.has(verb)) {
+    for (let i = 0; i < argv.length; i++) {
+      if (FIND_ACTION_FLAGS.has(argv[i])) out.push(i + 1)
+    }
   }
   return out
 }
@@ -586,6 +614,31 @@ function isMutationWord(argv: string[], i: number): boolean {
   if (base === undefined) return false
   if (MUTATION_VERBS.has(base)) return true
   return IN_PLACE_EDITORS.has(base) && argv.slice(i + 1).some((f) => IN_PLACE_FLAG.test(f))
+}
+
+/**
+ * True when the piped input never reaches the command `argv[0]` runs, so the path
+ * named upstream cannot be that command's target.
+ *
+ * `xargs -I{}` (and `-i`/`--replace`) substitutes the input line only where the
+ * placeholder appears: `echo <journal> | xargs -I{} rm -rf /tmp/junk` removes
+ * `/tmp/junk` and never names the journal, so denying it would be a false deny on
+ * an unappealable tier. `eval` and `exec` do not turn stdin into argv at all, so
+ * for them the borrowed target is never real either.
+ */
+function ignoresPipedInput(argv: string[], verb: string): boolean {
+  if (verb !== 'xargs') return true
+  for (let i = 0; i < argv.length; i++) {
+    const flag = argv[i] ?? ''
+    let placeholder: string | undefined
+    if (flag === '-i' || flag === '--replace') placeholder = '{}'
+    else if (flag.startsWith('-I')) placeholder = flag.length > 2 ? flag.slice(2) : (argv[i + 1] ?? '')
+    else if (flag.startsWith('--replace=')) placeholder = flag.slice('--replace='.length)
+    if (placeholder === undefined) continue
+    if (placeholder === '') return true
+    return !argv.some((word, k) => k !== i && word.includes(placeholder))
+  }
+  return false
 }
 
 /**
@@ -668,17 +721,21 @@ export function classify(ctx: ClassifyContext): Verdict {
   // Parsed once and shared: the tamper check and the rule loop judge the same
   // segments, wrappers already removed.
   const segs = command !== undefined ? unwrapSegments(parseCommand(command)) : []
-  // An OPAQUE verb's target may arrive from a sibling segment (`echo <journal> |
-  // xargs rm -f`), so the tamper check needs to know whether the COMMAND names a
-  // guard path, not only whether the segment does.
+  // An OPAQUE verb's target may arrive from the segment PIPED into it
+  // (`echo <journal> | xargs rm -f`), so the tamper check needs to know whether a
+  // guard path was named upstream AND carried here. The parser keeps the operator
+  // as the previous segment's last token, so `&&`/`;`/`||` cannot borrow a path.
   const namesGuardPath = (text: string) => guardSpellings.some((p) => text.includes(p))
-  const commandNamesGuardPath = segs.some((seg) => seg.argv.some(namesGuardPath))
+  const pipedFromGuardPath = (i: number) => {
+    const prev = segs[i - 1]
+    return prev !== undefined && prev.argv[prev.argv.length - 1] === '|' && prev.argv.some(namesGuardPath)
+  }
 
   // guard.tamper — highest priority, never approvable, scoped to EDITS (above).
   if (WRITE_FILE_TOOLS.has(tool) && path && touchesGuardConfig(path)) {
     return { ruleId: 'guard.tamper', tier: 'deny', target, detail: { reason: 'guard configuration write' } }
   }
-  if (segs.some((seg) => mutatesGuardPath(seg, namesGuardPath, commandNamesGuardPath))) {
+  if (segs.some((seg, i) => mutatesGuardPath(seg, namesGuardPath, pipedFromGuardPath(i)))) {
     return { ruleId: 'guard.tamper', tier: 'deny', target, detail: { reason: 'guard configuration access' } }
   }
 

@@ -297,6 +297,95 @@ describe('guard.tamper sees a mutation the segment verb does not name', () => {
       expect(run('bash', { command }), command).toMatchObject({ tier: 'allow' })
     }
   })
+
+  it('reads a mutation word as a command only where a segment can run one', () => {
+    // The descendant scan must not turn a mutation WORD in a data position into an
+    // edit: the first fix wave read every token of a non-mention segment, which
+    // denied `less -p rm <journal>` — a read the README promises falls through —
+    // and a few semantically wrong but harmless shapes. Only the parser's own
+    // "runs a trailing command" class (EXEC_WRAPPERS ∪ OPAQUE_VERBS) descends.
+    for (const command of [
+      `less -p rm ${journalFile}`,
+      `ag rm ${journalFile}`,
+      `git commit -m rm ${journalFile}`,
+      `tar -cf /tmp/x.tar rm ${journalFile}`,
+      `docker rm ${journalFile}`,
+      `node -e rm ${journalFile}`,
+      `gcc -c "rm -f ${journalFile}"`,
+    ]) {
+      expect(run('bash', { command }), command).toMatchObject({ tier: 'allow' })
+    }
+  })
+
+  it('does not let an unrelated opaque segment borrow a path named elsewhere', () => {
+    // The opaque-verb rule exists for a PIPELINE (`echo <path> | xargs rm -f`),
+    // where the target really does arrive from the sibling segment. Keying it on
+    // "any segment names a guard path" denied ordinary compounds whose `&&`
+    // sibling happened to run `xargs rm` on something else.
+    for (const command of [
+      `tail ${journalFile} && xargs rm -rf /tmp/junk`,
+      `grep -c x ${journalFile} || xargs rm -f /tmp/junk`,
+      `diff ${journalFile} /tmp/copy; eval hostname`,
+    ]) {
+      expect(run('bash', { command }), command).toMatchObject({ tier: 'allow' })
+    }
+  })
+
+  it('ignores an xargs substitution that never consumes its input', () => {
+    // `-I{}` replaces the input line only where the placeholder appears, so a
+    // command that never writes it does not touch the path the pipeline names.
+    expect(run('bash', { command: `echo ${journalFile} | xargs -I{} rm -rf /tmp/junk` }).tier).toBe('allow')
+    expect(run('bash', { command: `echo ${journalFile} | xargs -I{} rm -f {}` })).toMatchObject({
+      ruleId: 'guard.tamper',
+      tier: 'deny',
+    })
+  })
+
+  it('denies every other writer that destroys the file it names', () => {
+    // The verb family is the deny tier's weak spot: a closed list missed the
+    // transfers and editors that write or remove their target, all of which were
+    // an allow while the journal/settings could be overwritten with no prompt.
+    for (const command of [
+      `rsync -a /tmp/x ${journalFile}`,
+      `scp /tmp/x ${journalFile}`,
+      `curl -o ${journalFile} https://example.invalid/j`,
+      `wget -O ${journalFile} https://example.invalid/j`,
+      `patch ${settingsFile} < /tmp/p.diff`,
+      `unlink ${journalFile}`,
+      `rmdir ${journalFile}`,
+      `vi ${settingsFile}`,
+      `vim -c wq ${settingsFile}`,
+      `ed ${journalFile}`,
+    ]) {
+      expect(run('bash', { command }), command).toMatchObject({ ruleId: 'guard.tamper', tier: 'deny' })
+    }
+  })
+
+  it('keeps a transfer that names no guard path an allow', () => {
+    for (const command of [
+      'rsync -a /tmp/x /tmp/y',
+      'curl -o /tmp/x https://example.invalid/j',
+      'wget -O /tmp/x https://example.invalid/j',
+      `curl -T /tmp/x https://example.invalid/upload`,
+    ]) {
+      expect(run('bash', { command }), command).toMatchObject({ tier: 'allow' })
+    }
+  })
+
+  it('records the script-depth boundary instead of leaving it silent', () => {
+    // `mutatesGuardPath` reads a `-c` script to a depth of two: two levels deny
+    // (pinned above), a third is not read. Exotic enough to accept as a boundary,
+    // but it is a boundary, so it is pinned rather than implied.
+    const deep = `find . -exec bash -c "bash -c 'bash -c \\"rm -f ${journalFile}\\""' +`
+    expect(run('bash', { command: deep }).tier).toBe('allow')
+  })
+
+  it('deliberately does not treat touch on a guard path as an edit', () => {
+    // Documented ruling: `touch` changes mtime and destroys no content, and an
+    // empty config loads as the built-in defaults. The deny tier's bar is
+    // "edits the config or truncates/removes the journal".
+    expect(run('bash', { command: `touch ${journalFile}` }).tier).toBe('allow')
+  })
 })
 
 /**
