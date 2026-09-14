@@ -1,9 +1,9 @@
 {
   "name": "@ddtcorex/dsh-maestro-guard",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "private": false,
   "packageManager": "pnpm@11.7.0",
-  "description": "Maestro Guard — waterfall tools/pre-execute approval + blocklist stub (Phase A scaffold)",
+  "description": "Maestro Guard — pre-execute safety gate: native DSH approval prompts, parsed command-surface rules, decision journal",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",

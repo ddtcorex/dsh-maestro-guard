@@ -1,6 +1,6 @@
 # Contributing to dsh-maestro-guard
 
-Thank you for contributing to **dsh-maestro-guard** (`@ddtcorex/dsh-maestro-guard`) — host-only safety gate plugin for the DeepSeek Harness (DSH) that gates tool execution before dispatch via a waterfall pre-execute hook (approval store, secret redaction, permission policy).
+Thank you for contributing to **dsh-maestro-guard** (`@ddtcorex/dsh-maestro-guard`) — host-only safety gate plugin for the DeepSeek Harness (DSH) that gates tool execution before dispatch via a waterfall pre-execute hook (native DSH approval prompts, secret redaction, permission policy).
 
 ## Getting Started
 
@@ -72,7 +72,7 @@ pnpm build               # tsc -> lib/
 test -f lib/index.js && echo "flat OK" || echo "FAIL"
 ```
 
-Host-only: no `build:client` step, no client bundle. Guard is pure modules (approval-store / redactor / policy) — evidence is the vitest suite plus `tsc --noEmit`.
+Host-only: no `build:client` step, no client bundle. Guard is pure modules (rules / decide / journal / redact / permission policy) — evidence is the vitest suite plus `tsc --noEmit`.
 
 Do not claim verified/done/clean without having actually run the checks — be ready to paste exact command output in the PR.
 
