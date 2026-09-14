@@ -14,7 +14,9 @@
  * - nothing is silently dropped — every word, operator, redirection operator and
  *   redirection target appears exactly once across the segments' `argv`, so a
  *   rule can always re-derive the text it needs (an operator keeps its own
- *   token kind and is never read as a word);
+ *   token kind and is never read as a word). The one deliberate exception is a
+ *   heredoc BODY: it is not command surface, so it leaves the token stream and
+ *   is attached to its owning segment as `Segment.heredoc` instead;
  * - anything unresolvable is marked `ambiguous` rather than guessed, and the
  *   rule layer treats ambiguity as "ask", never as "allow".
  *
@@ -29,6 +31,19 @@
  * - a backtick substitutes a command exactly like `$(...)` does, so it sets the
  *   same expandable signal — otherwise `` echo `git -C /repo push origin v1.2.3`
  *   `` reads as a resolved `echo` and the push never reaches a rule.
+ *
+ * `unwrapSegments` is the layer above that parse. It removes the wrappers that
+ * only change WHO runs a command (`env VAR=…`, `sudo`, `nohup`, `time`), replaces
+ * a shell wrapper with the script it runs (`bash -c <script>`, `bash -s`, and a
+ * `bash <<EOF` body), and tags every segment it derives with `wrappedBy`. A body
+ * fed to a non-shell — `cat`, `tee`, an interpreter — stays data and is never
+ * turned into segments; it is attached as `Segment.heredoc` so a rule can inspect
+ * it without parsing it. A wrapper whose script cannot be read (a script file, a
+ * `-c` with no argument, a nest deeper than `MAX_WRAP_DEPTH`, an interpreter's
+ * inline program) marks its segments `ambiguous` instead of being treated as
+ * resolved — and so does an exec-like wrapper the guard deliberately does not
+ * unwrap (`timeout`, `nice`, `setsid`, `watch`, …), which runs a command of its
+ * own that would otherwise never reach a rule.
  *
  * Pure module: string in, data out. No filesystem, no child processes, no
  * network, and no expansion of `$VAR`/backticks — an unexpanded token is exactly
@@ -50,10 +65,69 @@ export interface Segment {
   paths: string[]
   ambiguous: boolean
   wrappedBy?: string
+  /**
+   * Every heredoc body this segment owns (`<<`/`<<-`), concatenated in feed
+   * order with a `\n` between them: terminators are excluded and each body keeps
+   * its own trailing newline. Present only when the segment owns at least one
+   * heredoc redirection, so more than one cannot be told apart here. A rule that
+   * judges content inspects it instead of forcing the body back through the
+   * parser.
+   */
+  heredoc?: string
 }
 
 /** Verbs whose meaning is entirely "run whatever the arguments say". */
 const OPAQUE_VERBS = new Set(['eval', 'exec', 'xargs'])
+
+/**
+ * Verbs that run a trailing COMMAND of their own — after their own options and,
+ * for most of them, a leading duration/priority/pid argument. The verb the guard
+ * reads is therefore not the verb that executes: `timeout 5 bash -c '…'` runs
+ * bash, never `timeout`, and the real command is invisible to a rule keyed on it.
+ *
+ * `unwrapSegments` does not unwrap these forms, because their argument grammar
+ * is per-verb (`timeout 5 CMD`, `nice -n 5 CMD`, `stdbuf -o0 CMD`, `flock FILE
+ * CMD`, …) and a wrong guess would hide the command rather than reveal it. Each
+ * one is marked `ambiguous` instead, which the rule layer answers with a prompt,
+ * never an allow. `xargs` is the same shape and is already in `OPAQUE_VERBS`.
+ *
+ * The class is closed over that SHAPE, not over a hand-picked sample: a verb that
+ * runs a trailing command belongs here even when it is a tracer (`strace`,
+ * `ltrace`), a sandbox/root switcher (`chroot`, `setarch`, `bwrap`, `fakeroot`),
+ * a remote runner (`ssh`), or a scheduler/multiplexer (`parallel`, `unbuffer`,
+ * `script`, `caffeinate`). Leaving one out does not fail safe: the segment reads
+ * as a resolved verb and the command it really runs never reaches a rule.
+ */
+const EXEC_WRAPPERS = new Set([
+  'bwrap',
+  'caffeinate',
+  'chroot',
+  'chrt',
+  'cpulimit',
+  'doas',
+  'fakeroot',
+  'flock',
+  'ionice',
+  'ltrace',
+  'nice',
+  'nsenter',
+  'parallel',
+  'runuser',
+  'script',
+  'setarch',
+  'setpriv',
+  'setsid',
+  'ssh',
+  'stdbuf',
+  'strace',
+  'su',
+  'systemd-run',
+  'taskset',
+  'timeout',
+  'unbuffer',
+  'unshare',
+  'watch',
+])
 
 /**
  * Global options that consume the FOLLOWING token as their value, per verb.
@@ -118,6 +192,10 @@ interface Tok {
   end: number
   /** True when the token still holds a `$` the shell would expand. */
   expandable: boolean
+  /** The body of a heredoc whose delimiter this token is. */
+  heredoc?: string
+  /** True when that delimiter was quoted, which disables expansion of the body. */
+  heredocQuoted?: boolean
 }
 
 /** Read one redirection at `i`: `>`, `>>`, `<`, `<<`, `<<<`, `N>&M`, `&>`. */
@@ -145,6 +223,33 @@ function scanRedirect(input: string, i: number): { op: string; dup: boolean; nex
   return { op, dup: false, next: j }
 }
 
+/**
+ * Read the body of one heredoc: every line after `pos` up to the line that holds
+ * only the delimiter. Returns the body (terminator excluded, each line keeping
+ * its newline) and where tokenizing resumes. An unterminated heredoc consumes
+ * the rest of the input — a body must never leak back out as argv.
+ */
+function readHeredocBody(
+  input: string,
+  pos: number,
+  delim: string,
+  stripTabs: boolean,
+): { body: string; next: number } {
+  if (pos >= input.length) return { body: '', next: input.length }
+  let body = ''
+  let p = pos
+  for (;;) {
+    const nl = input.indexOf('\n', p)
+    const end = nl === -1 ? input.length : nl
+    const line = input.slice(p, end)
+    const compared = stripTabs ? line.replace(/^\t+/, '') : line
+    if (compared === delim) return { body, next: nl === -1 ? input.length : nl + 1 }
+    body += compared + '\n'
+    if (nl === -1) return { body, next: input.length }
+    p = nl + 1
+  }
+}
+
 /** Split the command into tokens, keeping separators as their own tokens. */
 function tokenize(input: string): Tok[] {
   const toks: Tok[] = []
@@ -155,12 +260,34 @@ function tokenize(input: string): Tok[] {
   // 'file' → the next word is a redirection target; 'heredoc' → it is a heredoc
   // delimiter (a word, never a path); null → nothing pending.
   let pending: 'file' | 'heredoc' | null = null
+  // Delimiters seen but not yet fed. Their bodies start after the next newline,
+  // so the queue is drained at the newline that ends the current line.
+  let heredocs: { index: number; delim: string; stripTabs: boolean }[] = []
+  let heredocTabs = false
   let i = 0
 
   const emit = (text: string, kind: TokKind, start: number, end: number): void => {
     const k = kind === 'word' && pending === 'file' ? 'target' : kind
-    if (kind === 'word' && pending !== null) pending = null
-    toks.push({ text, kind: k, start, end, expandable })
+    const delimiter = kind === 'word' && pending === 'heredoc'
+    if (delimiter) {
+      heredocs.push({ index: toks.length, delim: text, stripTabs: heredocTabs })
+      pending = null
+      heredocTabs = false
+    } else if (kind === 'word' && pending !== null) {
+      pending = null
+      heredocTabs = false
+    }
+    toks.push({
+      text,
+      kind: k,
+      start,
+      end,
+      expandable,
+      // For a delimiter the source slice still holds the quotes, so it says
+      // whether the shell expands the body (`<<EOF`) or reads it literally
+      // (`<<'EOF'`).
+      ...(delimiter ? { heredocQuoted: /['"]/.test(input.slice(start, end)) } : {}),
+    })
     expandable = false
   }
   const flush = (end: number): void => {
@@ -230,6 +357,17 @@ function tokenize(input: string): Tok[] {
     if (ch === '\n' || ch === ';') {
       sep(ch, i + 1)
       i++
+      // Heredoc bodies begin on the line after the delimiter; consume them here
+      // so no body word is ever read as argv of the segment that owns them.
+      if (ch === '\n' && heredocs.length > 0) {
+        const queue = heredocs
+        heredocs = []
+        for (const h of queue) {
+          const read = readHeredocBody(input, i, h.delim, h.stripTabs)
+          toks[h.index].heredoc = read.body
+          i = read.next
+        }
+      }
       continue
     }
     if (ch === '#' && buf === '') {
@@ -262,9 +400,20 @@ function tokenize(input: string): Tok[] {
         expandable = false
       } else flush(i)
       const r = scanRedirect(input, i)
-      toks.push({ text: input.slice(start, i) + r.op, kind: 'redir', start, end: r.next, expandable: false })
-      pending = r.dup ? null : r.op.startsWith('<<') ? 'heredoc' : 'file'
-      i = r.next
+      // `<<-` is a heredoc too; its body is indented with tabs, which both the
+      // body lines and the terminator may carry.
+      const tabs = r.op === '<<' && input[r.next] === '-'
+      const op = tabs ? '<<-' : r.op
+      const next = tabs ? r.next + 1 : r.next
+      // Only `<<` and `<<-` introduce a body. `<<<` is a here-string: its
+      // argument is one ordinary word, so queueing it as a delimiter would let
+      // the body reader eat every following line as a "body" and hide the
+      // commands after it from every downstream rule.
+      const heredoc = op === '<<' || op === '<<-'
+      toks.push({ text: input.slice(start, i) + op, kind: 'redir', start, end: next, expandable: false })
+      pending = r.dup ? null : heredoc ? 'heredoc' : 'file'
+      heredocTabs = pending === 'heredoc' && tabs
+      i = next
       continue
     }
     if (buf === '') bufStart = i
@@ -275,6 +424,10 @@ function tokenize(input: string): Tok[] {
     i++
   }
   flush(i)
+  // A delimiter at the end of the input still owns a (possibly empty) body.
+  for (const h of heredocs) {
+    toks[h.index].heredoc = readHeredocBody(input, input.length, h.delim, h.stripTabs).body
+  }
   return toks
 }
 
@@ -350,9 +503,12 @@ function buildSegment(source: string, toks: Tok[], exhausted: boolean): Segment 
           .filter((t) => t.kind === 'word' && !t.text.startsWith('-'))
           .map((t) => t.text)
   const ambiguous =
-    exhausted || sub.unknownOption || toks.some((t) => t.expandable) || (verb !== undefined && OPAQUE_VERBS.has(verb))
+    exhausted ||
+    sub.unknownOption ||
+    toks.some((t) => t.expandable) ||
+    (verb !== undefined && (OPAQUE_VERBS.has(verb) || EXEC_WRAPPERS.has(verb)))
   const words = toks.filter((t) => t.kind !== 'sep')
-  return {
+  const segment: Segment = {
     raw: source.slice(words[0].start, words[words.length - 1].end).trim(),
     argv,
     verb,
@@ -362,6 +518,10 @@ function buildSegment(source: string, toks: Tok[], exhausted: boolean): Segment 
     paths: [...new Set(paths)],
     ambiguous,
   }
+  // Bodies stay in order for the (exotic) segment that owns more than one.
+  const bodies = toks.filter((t) => t.heredoc !== undefined).map((t) => t.heredoc as string)
+  if (bodies.length > 0) segment.heredoc = bodies.join('\n')
+  return segment
 }
 
 /**
@@ -371,7 +531,10 @@ function buildSegment(source: string, toks: Tok[], exhausted: boolean): Segment 
  *
  * The operator that ends a segment stays in that segment's `argv` (its kind is
  * `sep`, so no rule reads it as a word): splitting must not drop tokens, and the
- * round-trip invariant is asserted on the concatenated `argv`.
+ * concatenated `argv` still holds every word, operator and redirection target of
+ * the command. A heredoc BODY is the one deliberate exception — it is not argv —
+ * so the round trip covers the command surface only: every body is removed from
+ * the token stream and attached to its owning segment as `Segment.heredoc`.
  */
 export function parseCommand(command: string, depth = 0): Segment[] {
   const exhausted = depth >= MAX_WRAP_DEPTH
@@ -393,4 +556,329 @@ export function parseCommand(command: string, depth = 0): Segment[] {
   }
   flushGroup()
   return segments
+}
+
+/* ------------------------------------------------------------------ *
+ * Wrapper unwrapping and heredoc classification
+ * ------------------------------------------------------------------ */
+
+/**
+ * Shells whose `-c <script>` argument the guard can parse as a script itself,
+ * plus the same shape under other POSIX-ish names. A verb outside this set is
+ * judged as itself: the guard never guesses that some other program runs its
+ * argument as a shell script — only the interpreters below are known to run an
+ * argument as a program, and those stay ambiguous instead.
+ */
+const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'ash', 'fish', 'csh', 'tcsh'])
+
+/**
+ * Verbs that run an inline program in another language. `python -c`, `node -e`
+ * and friends are wrapper forms the guard cannot read: the segment stays
+ * ambiguous, because "the program is opaque" must never read as "nothing runs".
+ */
+const INTERPRETER_SCRIPT_FLAGS: Record<string, readonly string[]> = {
+  python: ['-c'],
+  python3: ['-c'],
+  node: ['-e', '-p'],
+  perl: ['-e', '-E'],
+  ruby: ['-e'],
+  php: ['-r'],
+}
+
+/**
+ * Prefixes that change WHO runs a command, never what it is. Stripping them is
+ * what keeps `sudo git push` and the bare `git push` judged by the same rule.
+ * `command` is the POSIX builtin prefix; `busybox` is a multi-call dispatcher
+ * whose first word is the applet that really runs (`busybox sh -c …`).
+ */
+const PREFIX_VERBS = new Set(['env', 'sudo', 'nohup', 'time', 'command', 'busybox'])
+
+/** Valueless short options, per prefix verb. */
+const PREFIX_BARE_SHORT: Record<string, string> = {
+  env: 'i0v',
+  sudo: 'EHinSbkKAelsV',
+  time: 'pvaq',
+  nohup: '',
+  command: 'pVv',
+  busybox: '',
+}
+
+/** Short options that consume a value (glued or separated), per prefix verb. */
+const PREFIX_VALUE_SHORT: Record<string, string> = {
+  env: 'uCS',
+  sudo: 'ughpCTrRtUDZ',
+  time: 'o',
+  nohup: '',
+  command: '',
+  busybox: '',
+}
+
+const PREFIX_BARE_LONG: Record<string, readonly string[]> = {
+  env: ['--ignore-environment', '--null', '--debug'],
+  sudo: [
+    '--preserve-env',
+    '--login',
+    '--shell',
+    '--stdin',
+    '--non-interactive',
+    '--set-home',
+    '--reset-timestamp',
+    '--validate',
+    '--list',
+    '--edit',
+    '--askpass',
+    '--background',
+    '--version',
+    '--help',
+  ],
+  time: ['--portability', '--verbose', '--append', '--quiet'],
+  nohup: ['--help', '--version'],
+  command: [],
+  busybox: ['--help', '--version'],
+}
+
+const PREFIX_VALUE_LONG: Record<string, readonly string[]> = {
+  env: ['--unset', '--chdir', '--split-string'],
+  sudo: [
+    '--user',
+    '--group',
+    '--host',
+    '--prompt',
+    '--close-from',
+    '--command-timeout',
+    '--role',
+    '--type',
+    '--other-user',
+    '--chdir',
+    '--chroot',
+  ],
+  time: ['--output'],
+  nohup: [],
+  command: [],
+  busybox: ['--install'],
+}
+
+/** `env FOO=1 …` — an assignment the prefix exports, never the command's verb. */
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
+
+interface Stripped {
+  /** The tokens from the real verb on. */
+  toks: Tok[]
+  /** How many leading tokens were removed. */
+  dropped: number
+  /** True when an unknown prefix option made the reading unprovable. */
+  ambiguous: boolean
+}
+
+/**
+ * Consume a prefix verb's own options and assignments.
+ *
+ * Fail-closed like `subcommandIndex`: an option that is in neither table may or
+ * may not consume the next word. The optimistic reading skips the pair (which
+ * keeps the real verb visible) and records `ambiguous`, so the rule layer asks
+ * rather than allows.
+ */
+function skipPrefixOptions(verb: string, toks: Tok[], start: number): { index: number; ambiguous: boolean } {
+  const bareShort = PREFIX_BARE_SHORT[verb] ?? ''
+  const valueShort = PREFIX_VALUE_SHORT[verb] ?? ''
+  const bareLong = PREFIX_BARE_LONG[verb] ?? []
+  const valueLong = PREFIX_VALUE_LONG[verb] ?? []
+  let i = start
+  let ambiguous = false
+  while (i < toks.length) {
+    const t = toks[i]
+    if (t.kind !== 'word') break
+    if (verb === 'env' && ENV_ASSIGNMENT.test(t.text)) {
+      i++
+      continue
+    }
+    if (t.text === '--') {
+      i++
+      break
+    }
+    if (!t.text.startsWith('-') || t.text === '-') break
+    const next = toks[i + 1]
+    const consumeValue = (): void => {
+      if (next !== undefined && next.kind === 'word') i += 2
+      else {
+        ambiguous = true
+        i++
+      }
+    }
+    if (t.text.startsWith('--')) {
+      if (t.text.indexOf('=') > 0) i++ // --name=value is self-contained
+      else if (bareLong.includes(t.text)) i++
+      else if (valueLong.includes(t.text)) consumeValue()
+      else if (next !== undefined && next.kind === 'word' && !next.text.startsWith('-')) {
+        ambiguous = true
+        i += 2
+      } else i++
+      continue
+    }
+    // A single-dash cluster: every character before a value-taking one is a flag.
+    const chars = t.text.slice(1)
+    let done = false
+    for (let k = 0; k < chars.length && !done; k++) {
+      const c = chars[k]
+      if (verb === 'command' && (c === 'v' || c === 'V')) {
+        // `command -v ls` / `command -V ls` only report where `ls` resolves to
+        // (or describe it); they execute nothing. The guard has no "word that is
+        // not a command" shape, so the reading is recorded as unprovable rather
+        // than derived as a resolved `ls` execution that never happens.
+        // `command -p ls` DOES run `ls`, so it stays resolvable.
+        ambiguous = true
+        continue
+      }
+      if (bareShort.includes(c)) continue
+      if (valueShort.includes(c)) {
+        if (k + 1 < chars.length) i++ // -uroot: the rest of the cluster is the value
+        else consumeValue() // -u root: the value is the next word
+        done = true
+        break
+      }
+      ambiguous = true
+      i++
+      done = true
+      break
+    }
+    if (!done) i++
+  }
+  return { index: i, ambiguous }
+}
+
+/** Drop the leading `env …` / `sudo …` / `nohup …` / `time …` prefixes. */
+function stripPrefixes(toks: Tok[]): Stripped {
+  let i = 0
+  let ambiguous = false
+  for (;;) {
+    const t = toks[i]
+    if (t === undefined || t.kind !== 'word' || !PREFIX_VERBS.has(t.text)) break
+    i++
+    const skipped = skipPrefixOptions(t.text, toks, i)
+    i = skipped.index
+    ambiguous = ambiguous || skipped.ambiguous
+  }
+  return { toks: toks.slice(i), dropped: i, ambiguous }
+}
+
+/**
+ * The script a shell was told to run with `-c`: `-c cmd`, `-c'cmd'`, `-lc cmd`.
+ * `found: false` means no `-c` appears at all (a script file, `-s`, a bare
+ * shell), and `script: undefined` means `-c` had no argument — both unreadable.
+ */
+function shellCommandArg(toks: Tok[]): { found: boolean; script?: string } {
+  for (let i = 1; i < toks.length; i++) {
+    const t = toks[i]
+    if (t.kind !== 'word') break
+    if (t.text === '--') break
+    if (!t.text.startsWith('-') || t.text === '-') break
+    if (t.text.startsWith('--')) {
+      if (t.text === '--rcfile' || t.text === '--init-file') i++ // takes a value
+      continue
+    }
+    const chars = t.text.slice(1)
+    for (let k = 0; k < chars.length; k++) {
+      const c = chars[k]
+      if (c === 'c') {
+        const inline = chars.slice(k + 1)
+        if (inline !== '') return { found: true, script: inline }
+        const next = toks[i + 1]
+        return { found: true, script: next !== undefined && next.kind === 'word' ? next.text : undefined }
+      }
+      if (c === 'o' || c === 'O') {
+        if (k + 1 === chars.length) i++ // -o pipefail: the value is the next word
+        break
+      }
+    }
+  }
+  return { found: false }
+}
+
+/** True when an interpreter carries an inline program (`python -c`, `node -e`). */
+function hasInterpreterScript(toks: Tok[]): boolean {
+  const verb = toks[0]?.text
+  if (verb === undefined) return false
+  const flags = INTERPRETER_SCRIPT_FLAGS[verb]
+  if (flags === undefined) return false
+  for (let i = 1; i < toks.length; i++) {
+    const t = toks[i]
+    if (t.kind !== 'word') break
+    if (t.text === '--') break
+    if (!t.text.startsWith('-') || t.text === '-') break
+    if (flags.includes(t.text)) return true
+    if (!t.text.startsWith('--')) {
+      for (const c of t.text.slice(1)) if (flags.includes('-' + c)) return true
+    }
+  }
+  return false
+}
+
+/** The tokens of one segment again, so its fields can be re-derived. */
+function segmentTokens(seg: Segment): Tok[] {
+  return tokenize(seg.raw).filter((t) => t.kind !== 'sep')
+}
+
+/** Re-derive a segment from a token subset of its own source text. */
+function rebuild(seg: Segment, toks: Tok[], forced: boolean): Segment {
+  const words = toks.filter((t) => t.kind !== 'sep')
+  if (words.length === 0) {
+    return { raw: seg.raw, argv: [], flags: [], refspecs: [], paths: [], ambiguous: true }
+  }
+  const built = buildSegment(seg.raw, words, forced)
+  if (seg.heredoc !== undefined) built.heredoc = seg.heredoc
+  return built
+}
+
+/**
+ * Remove every wrapper around a parsed command and return the segments that
+ * actually run.
+ *
+ * A segment that is not a wrapper is returned unchanged — same object, no
+ * re-derivation — so the common path costs nothing and cannot drift. A shell
+ * wrapper (`bash -c …`, `bash -s`, a `bash <<EOF` body) is REPLACED by the
+ * segments of its script, each tagged `wrappedBy`. A wrapper that cannot be read
+ * — unknown nesting past `MAX_WRAP_DEPTH`, a `-c` with no argument, a script file
+ * the guard cannot open, an interpreter's inline program — stays in the result
+ * marked `ambiguous`, which the rule layer answers with a prompt, never an allow.
+ * An exec-like wrapper (`timeout`, `nice`, `setsid`, `watch`, …) is not unwrapped
+ * at all and is `ambiguous` for the same reason: the command it runs is not the
+ * command the guard read.
+ */
+export function unwrapSegments(segs: Segment[], depth = 0): Segment[] {
+  const out: Segment[] = []
+  for (const seg of segs) out.push(...unwrapSegment(seg, depth))
+  return out
+}
+
+function unwrapSegment(seg: Segment, depth: number): Segment[] {
+  const toks = segmentTokens(seg)
+  const stripped = stripPrefixes(toks)
+  const rest = stripped.toks
+  const verb = rest[0] !== undefined && rest[0].kind === 'word' ? rest[0].text : undefined
+
+  if (verb !== undefined && SHELLS.has(verb)) {
+    const command = shellCommandArg(rest)
+    const script = command.found ? command.script : seg.heredoc
+    if (script === undefined || depth >= MAX_WRAP_DEPTH) return [rebuild(seg, rest, true)]
+    // Two readings stay approximations even with a script in hand: a `-c` script
+    // that is also fed a heredoc may run whatever that body holds, and an
+    // UNQUOTED heredoc delimiter lets the outer shell expand the body first. Mark
+    // the derived segments ambiguous rather than present the text as exact.
+    const delimiters = toks.filter((t) => t.heredoc !== undefined)
+    const expanded =
+      delimiters.length > 0 && !delimiters.every((t) => t.heredocQuoted === true) && /[$`]/.test(script)
+    const approximate = (command.found && seg.heredoc !== undefined) || (!command.found && expanded)
+    const inner = unwrapSegments(parseCommand(script, depth + 1), depth + 1)
+    if (inner.length === 0) return [rebuild(seg, rest, true)]
+    const ambiguous = seg.ambiguous || stripped.ambiguous || approximate
+    return inner.map((s) => ({ ...s, wrappedBy: verb, ambiguous: s.ambiguous || ambiguous }))
+  }
+
+  const opaque =
+    stripped.ambiguous ||
+    (verb !== undefined &&
+      INTERPRETER_SCRIPT_FLAGS[verb] !== undefined &&
+      (hasInterpreterScript(rest) || seg.heredoc !== undefined))
+  if (stripped.dropped === 0 && !opaque) return [seg]
+  return [rebuild(seg, rest, seg.ambiguous || opaque)]
 }
