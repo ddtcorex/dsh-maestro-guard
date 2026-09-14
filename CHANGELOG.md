@@ -69,6 +69,41 @@ All notable changes to this project are documented in this file. Format follows
   is gated like any other write outside the session cwd. Read per call, so it applies from the
   next tool call.
 
+### Fixed
+- `secret.access` reads the parsed segment **argv** instead of `stripQuoted(command)`, which erased
+  a quoted protected path before the rule looked: `cat "<path>"`, `cat '<path>'`,
+  `cp "<path>" /tmp/x`, `curl -T "<path>" …` and the write-into `cp /tmp/x "<path>"` were allowed
+  while their unquoted forms asked. A mention-only verb is still never an access and a heredoc body
+  is still data; an ambiguous segment (an interpreter inline program, an unknown wrapper) now
+  treats a protected path in its argv as an access on its own — the deliberate fail-closed
+  trade-off, pinned by a corpus row.
+- A segment whose first token cannot be a command (a `VAR=value` assignment, a `(`/`{` group
+  opener, a shell keyword) or whose later tokens name a rule verb while `argv[0]` does not
+  (`pkexec`, `perf`, `valgrind`, `sshpass`, `daemonize`, `xvfb-run`, `watchexec`, …) is marked
+  ambiguous and escalated to `ask`. Those shapes used to be silently allowed because `verb =
+  argv[0]` matched no rule.
+- `decide()` no longer treats a `domains.guard.rules` entry that merely echoes the rule's built-in
+  default as an override. The handler passes the fully-populated default table, so that reading
+  made the classifier's `--dry-run` → `journal` refinement unreachable and production asked for a
+  dry run. An entry that differs from the default still raises or lowers the tier, and
+  `guard.tamper`'s `deny` floor is unchanged. The corpus and its driver now assert through the same
+  call the handler makes.
+- `guardConfigPaths()` covers the journal and the retired `legacy-pending.json` (truncating or
+  removing the guard's own audit trail is the `deny` tier the spec names) and the profile
+  `package.json` that actually mounts the guard row.
+- An unknown `tools/pre-execute` payload now denies and journals `contract-mismatch` (spec §8). A
+  DSH upgrade that renamed `args` used to make every command rule read `undefined` and silently
+  allow everything.
+- The thrown approval message is stored in the journal entry's `note`, so the deny text ("see the
+  guard journal") points at a record that actually carries it. A granted ask returns `next()`
+  rather than a bare allow, so later pre-execute listeners still run.
+- `domains.guard.journal`'s `retainFiles`/`retainDays` and `domains.guard.workingDirContainment`
+  are validated on merge; a non-numeric retention window used to make `rotate()` prune every
+  archive.
+- `maestro_guard_stats` folds only closed rule ids into `byRule`/`byTier`, so the guard's own
+  bookkeeping rows (`counters`, `config-legacy`, `guard.migration`, `policy.deny`) no longer appear
+  as decisions; `byOutcome` still counts every row.
+
 ### Removed
 - `pending.json` ticket store, the approve/list tools and the unused approval store. A legacy
   ticket file is retired to `legacy-pending.json` on first boot.
