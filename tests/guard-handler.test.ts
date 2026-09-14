@@ -205,3 +205,84 @@ describe('createGuardHandler — branch scope with real repositories', () => {
     expect(branchOf('')).toBeUndefined()
   })
 })
+
+/**
+ * IMPORTANT 5 / 7 and the granted-ask pass-through.
+ *
+ * Spec §8: an unknown `tools/pre-execute` payload must `deny` + journal
+ * `contract-mismatch`. The guard reads `exec.name ?? exec.tool` and
+ * `exec.args ?? exec.arguments`; a DSH upgrade that renames either field would
+ * otherwise make every command rule read `undefined` and silently allow
+ * everything. These cases pin the live shape as KNOWN and the renamed shape as
+ * denied.
+ */
+describe('createGuardHandler — runtime contract and the approval error note', () => {
+  it('recognizes the LIVE payload shape (name/arguments/callId) and classifies it', async () => {
+    const { handler, asked } = await setup('granted')
+    // The real DSH execution carries `name` and `arguments` plus callId/signal —
+    // never the `args` alias the guard also accepts.
+    const res = await handler(
+      { name: 'bash', arguments: { command: 'git push origin master' }, callId: 'call-1', signal: new AbortController().signal } as any,
+      async () => ({ kind: 'allow' as const }),
+    )
+    expect(res).toEqual({ kind: 'allow' })
+    expect(asked[0]).toContain('git.push.protected')
+  })
+
+  it('denies and journals contract-mismatch when the arguments field is renamed away', async () => {
+    const { handler, next, dir } = await setup('granted')
+    const res = await handler({ name: 'bash', input: { command: 'git push origin master' } } as any, next)
+    expect(res.kind).toBe('deny')
+    expect(String((res as any).reason)).toContain('contract-mismatch')
+    const entry = JSON.parse((await readFile(journalPath(dir), 'utf8')).trim())
+    expect(entry).toMatchObject({ rule: 'contract-mismatch', tier: 'deny', outcome: 'denied' })
+    expect(entry.note).toContain('arguments')
+  })
+
+  it('denies and journals contract-mismatch when the payload carries no tool name', async () => {
+    const { handler, next, dir } = await setup('granted')
+    const res = await handler({ args: { command: 'git push origin master' } } as any, next)
+    expect(res.kind).toBe('deny')
+    expect(String((res as any).reason)).toContain('contract-mismatch')
+    const entry = JSON.parse((await readFile(journalPath(dir), 'utf8')).trim())
+    expect(entry).toMatchObject({ rule: 'contract-mismatch', tier: 'deny' })
+  })
+
+  it('denies a payload that is not an object at all', async () => {
+    const { handler, next, dir } = await setup('granted')
+    const res = await handler(undefined as any, next)
+    expect(res.kind).toBe('deny')
+    expect(String((res as any).reason)).toContain('contract-mismatch')
+    expect(JSON.parse((await readFile(journalPath(dir), 'utf8')).trim()).rule).toBe('contract-mismatch')
+  })
+
+  it('journals the thrown approval message as the note, keeping the deny text honest', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'h-note-'))
+    const handler = createGuardHandler({
+      journal: new Journal(dir),
+      policy: new PermissionPolicy({}),
+      readConfig: async () => DEFAULT_CONFIG,
+      requestApproval: async () => ({ outcome: 'error', note: 'no open turn: ask from inside the turn' }),
+      branchOf: () => 'feature',
+    })
+    const res = await handler({ name: 'bash', args: { command: 'git push origin master' } } as any, async () => ({ kind: 'allow' as const }))
+    expect(res.kind).toBe('deny')
+    // The text points at the journal — so the journal must carry the reason.
+    expect(String((res as any).reason)).toMatch(/see the guard journal/)
+    const entry = JSON.parse((await readFile(journalPath(dir), 'utf8')).trim())
+    expect(entry).toMatchObject({ outcome: 'error' })
+    expect(entry.note).toContain('no open turn')
+  })
+
+  it('runs later pre-execute listeners on a granted ask (returns next(), not a bare allow)', async () => {
+    const { handler, asked } = await setup('granted')
+    let nextCalled = false
+    const res = await handler(
+      { name: 'bash', args: { command: 'git push origin master' } } as any,
+      async () => { nextCalled = true; return { kind: 'allow' as const } },
+    )
+    expect(asked).toHaveLength(1)
+    expect(nextCalled).toBe(true)
+    expect(res).toEqual({ kind: 'allow' })
+  })
+})

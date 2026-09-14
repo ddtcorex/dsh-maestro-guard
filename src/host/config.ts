@@ -45,6 +45,23 @@ function stringArray(v: unknown): string[] | undefined {
 }
 
 /**
+ * A retention window must be a positive finite number. The journal block used to
+ * be spread into the defaults unvalidated, and `rotate()` multiplies/compares
+ * with both windows: `retainDays: "30"` makes the day cutoff `NaN` and
+ * `retainFiles: "14"` makes the file window compare false, so BETWEEN them a
+ * non-numeric value prunes EVERY archive. An invalid value falls back to the
+ * built-in default — the fail-safe direction for a retention window.
+ */
+function positiveInt(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : undefined
+}
+
+/** A boolean config switch, or the built-in default when it is not a boolean. */
+function booleanOr(v: unknown, fallback: boolean): boolean {
+  return typeof v === 'boolean' ? v : fallback
+}
+
+/**
  * Merge the persisted `domains.guard` object onto the defaults. Only keys that
  * are actually present are overlaid, and `rules` merges per rule id, so a
  * partial config can neither drop the default tiers nor unset the protected
@@ -70,9 +87,21 @@ export function mergeGuardConfig(raw: unknown): GuardConfigV2 {
   base.protectedBranches = stringArray(raw.protectedBranches) ?? base.protectedBranches
   base.protectedPaths = stringArray(raw.protectedPaths) ?? base.protectedPaths
   base.guardPaths = stringArray(raw.guardPaths) ?? base.guardPaths
-  if (isPlainObject(raw.journal)) base.journal = { ...base.journal, ...(raw.journal as GuardConfigV2['journal']) }
+  if (isPlainObject(raw.journal)) {
+    const j = raw.journal as Record<string, unknown>
+    base.journal = {
+      enabled: booleanOr(j.enabled, base.journal.enabled),
+      allowCounters: booleanOr(j.allowCounters, base.journal.allowCounters),
+      retainDays: positiveInt(j.retainDays) ?? base.journal.retainDays,
+      retainFiles: positiveInt(j.retainFiles) ?? base.journal.retainFiles,
+    }
+  }
   if (isPlainObject(raw.workingDirContainment)) {
-    base.workingDirContainment = { ...base.workingDirContainment, ...(raw.workingDirContainment as GuardConfigV2['workingDirContainment']) }
+    const c = raw.workingDirContainment as Record<string, unknown>
+    base.workingDirContainment = {
+      enabled: booleanOr(c.enabled, base.workingDirContainment.enabled),
+      spillReads: booleanOr(c.spillReads, base.workingDirContainment.spillReads),
+    }
   }
   return base
 }

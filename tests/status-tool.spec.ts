@@ -278,3 +278,29 @@ describe('guard status tools', () => {
     }
   })
 })
+
+/**
+ * IMPORTANT minor — `byRule`/`byTier` are documented as the DECISION fold, but
+ * they also counted the guard's own bookkeeping rows (`config-legacy`,
+ * `guard.migration`, `policy.deny`), inventing decisions attributed to ids that
+ * are not in the rule table. Only rows whose `rule` is one of the closed
+ * `RULE_IDS` are decisions now.
+ */
+describe('guard stats — non-decision rows', () => {
+  it('keeps the guard internal rows out of byRule and byTier', async () => {
+    const { journal, tools } = await setup()
+    for (const [rule, tier] of [
+      ['config-legacy', 'journal'],
+      ['guard.migration', 'journal'],
+      ['policy.deny', 'deny'],
+    ] as const) {
+      await journal.append({ tool: 'guard', rule, tier, target: rule, outcome: 'passed' })
+    }
+    const res = await tools.stats()
+    expect(res.byRule).toEqual({ 'git.push.protected': 1, 'git.merge.protected': 1 })
+    expect(res.byTier).toEqual({ ask: 1, journal: 1 })
+    // byOutcome still counts every row: an operator must see that a policy deny
+    // happened even though it is not a rule decision.
+    expect(res.byOutcome).toEqual({ granted: 1, passed: 4 })
+  })
+})

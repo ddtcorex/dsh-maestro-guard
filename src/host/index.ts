@@ -16,18 +16,60 @@ export interface GuardDeps {
   policy: PermissionPolicy
   readConfig: () => Promise<GuardConfigV2>
   branchOf?: (dir: string) => string | undefined
-  requestApproval: (req: { agent?: unknown; toolName: string; callId?: string; reason: string; signal?: AbortSignal }) => Promise<AskOutcome>
+  requestApproval: (req: { agent?: unknown; toolName: string; callId?: string; reason: string; signal?: AbortSignal }) => Promise<AskOutcome | ApprovalResult>
   now?: () => number
+}
+
+/**
+ * What the approval transport observed, plus why when it failed. A transport
+ * that only knows the outcome may return the bare {@link AskOutcome} string; one
+ * that caught an error returns this shape so the message reaches the journal.
+ */
+export interface ApprovalResult {
+  outcome: AskOutcome
+  /** The thrown message, journaled (and redacted) with the `error` outcome. */
+  note?: string
+}
+
+/** The rule id of the `tools/pre-execute` contract denial (spec §8). */
+export const CONTRACT_MISMATCH_RULE = 'contract-mismatch'
+
+/**
+ * The DSH `tools/pre-execute` contract the guard reads: a tool NAME and an
+ * arguments field. The guard accepts both spellings of each (`name`/`tool`,
+ * `args`/`arguments`), but a payload carrying neither is a DSH upgrade that
+ * renames a field — and a renamed `args` silently disables EVERY command rule,
+ * because `extractCommandText(undefined)` yields no command to classify.
+ * Spec §8: an unknown payload is a denial, never a pass.
+ */
+export function contractMismatch(exec: unknown): string | undefined {
+  if (exec === null || typeof exec !== 'object') return 'pre-execute payload is not an object'
+  const e = exec as GuardToolExecution
+  const name = typeof e.name === 'string' && e.name !== ''
+    ? e.name
+    : typeof e.tool === 'string' && e.tool !== '' ? e.tool : undefined
+  if (name === undefined) return 'pre-execute payload carries no tool name (`name`/`tool`)'
+  if (e.args === undefined && e.arguments === undefined) {
+    return 'pre-execute payload carries no arguments (`args`/`arguments`)'
+  }
+  return undefined
 }
 
 /**
  * Outcome vocabulary for the deny message. `unavailable` is the fail-closed
  * case that matters most: no answerer is attached to this session, so the
  * operation cannot be approved and must not silently proceed.
+ *
+ * `rejected` names BOTH causes on purpose. DSH's approval service resolves a
+ * session whose policy is `never` to `rejected` deterministically, before any
+ * answerer is dispatched (`packages/interaction/user-approval`), so the guard
+ * cannot tell a policy rejection from a human one — and a bare "the user
+ * rejected this" would be a lie in a session with no human in the loop. The
+ * message therefore carries the fix either way (spec §5.6/§8).
  */
 const EXPLAIN: Record<AskOutcome, string> = {
   granted: 'granted once',
-  rejected: 'the user rejected this operation',
+  rejected: 'not approved — the user rejected it, or this session does not prompt (a `never` approval policy rejects every ask); start a session under the full-access-ask preset or switch the preset in the picker',
   cancelled: 'the approval prompt was cancelled',
   unavailable: 'no approval channel is available for this session (start a session under the full-access-ask preset)',
   error: 'the approval request failed (see the guard journal)',
@@ -45,6 +87,20 @@ const EXPLAIN: Record<AskOutcome, string> = {
 export function createGuardHandler(deps: GuardDeps) {
   const now = deps.now ?? Date.now
   return async (exec: GuardToolExecution, next: () => Promise<GuardPreToolDecision>): Promise<GuardPreToolDecision> => {
+    // The runtime contract first: a payload the guard cannot read must be denied
+    // and journaled, never allowed — a renamed field would otherwise silence
+    // every command rule (spec §8).
+    const mismatch = contractMismatch(exec)
+    if (mismatch !== undefined) {
+      const label = typeof (exec as GuardToolExecution | undefined)?.name === 'string'
+        ? (exec as GuardToolExecution).name
+        : 'unknown'
+      await deps.journal.append({
+        tool: label, rule: CONTRACT_MISMATCH_RULE, tier: 'deny',
+        target: 'tools/pre-execute', outcome: 'denied', note: mismatch,
+      })
+      return { kind: 'deny', reason: `${CONTRACT_MISMATCH_RULE} :: ${mismatch}` }
+    }
     const tool = exec.name ?? exec.tool ?? ''
     const args = exec.args ?? exec.arguments
     const cwd = exec.agent?.session?.header?.cwd
@@ -81,14 +137,20 @@ export function createGuardHandler(deps: GuardDeps) {
       return { kind: 'deny', reason }
     }
     const t0 = now()
-    const outcome = await deps.requestApproval({
+    const raw = await deps.requestApproval({
       agent: exec.agent, toolName: tool, callId: exec.callId, reason, signal: exec.signal,
     })
+    const { outcome, note } = typeof raw === 'string' ? { outcome: raw, note: undefined } : raw
     await deps.journal.append({
       session, tool, rule: verdict.ruleId, tier, target: verdict.target, repo: verdict.repo,
       branch: verdict.branch, cwd, outcome, askMs: now() - t0,
+      // The deny text tells the human to see the journal, so the thrown reason
+      // has to be IN it; `Journal.append` redacts every string field.
+      ...(note === undefined ? {} : { note }),
     })
-    return outcome === 'granted' ? { kind: 'allow' } : { kind: 'deny', reason: `${reason} — ${EXPLAIN[outcome]}` }
+    // A granted ask returns `next()` rather than a bare allow so the remaining
+    // pre-execute listeners still run (a bare allow would short-circuit them).
+    return outcome === 'granted' ? next() : { kind: 'deny', reason: `${reason} — ${EXPLAIN[outcome]}` }
   }
 }
 
@@ -167,17 +229,21 @@ export default {
     const boot = await loadGuardConfigWithMigration().catch(() => ({ config: DEFAULT_CONFIG, migratedKeys: [] as string[] }))
     const journal = new Journal(undefined, Date.now, boot.config.journal)
     const policy = new PermissionPolicy({ deny: ['danger-tool'] })
-    const requestApproval = async (req: { agent?: unknown; toolName: string; callId?: string; reason: string; signal?: AbortSignal }): Promise<AskOutcome> => {
+    const requestApproval = async (req: { agent?: unknown; toolName: string; callId?: string; reason: string; signal?: AbortSignal }): Promise<ApprovalResult> => {
       const approval = ctx.get('approval') as NativeApproval | undefined
-      if (!approval || req.agent === undefined) return 'unavailable'
+      if (!approval || req.agent === undefined) return { outcome: 'unavailable' }
       try {
         const outcome = await approval.request({
           agent: req.agent, toolName: req.toolName, callId: req.callId, reason: req.reason, signal: req.signal,
         })
-        return outcome === 'allowed-once' ? 'granted' : (outcome as AskOutcome)
+        return { outcome: outcome === 'allowed-once' ? 'granted' : (outcome as AskOutcome) }
       } catch (e) {
-        console.error('[dsh-maestro-guard] approval request failed:', (e as Error)?.message)
-        return 'error'
+        // The thrown reason is what the human needs (an idle ask rejects with
+        // "outside an open turn"), so it travels with the outcome instead of
+        // being dropped on the floor with only a stderr note.
+        const message = (e as Error)?.message ?? String(e)
+        console.error('[dsh-maestro-guard] approval request failed:', message)
+        return { outcome: 'error', note: message }
       }
     }
     const handler = createGuardHandler({ journal, policy, readConfig: loadGuardConfig, branchOf, requestApproval })

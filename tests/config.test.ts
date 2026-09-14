@@ -253,3 +253,37 @@ describe('journalLegacyConfigMigration', () => {
     await expect(readFile(journalPath(home), 'utf8')).rejects.toThrow()
   })
 })
+
+/**
+ * IMPORTANT minor — `domains.guard.journal.retainFiles`/`retainDays` were spread
+ * into the merged block unvalidated, so a non-numeric value silently disabled a
+ * retention window: `retainDays` made `rotate()`'s day cutoff `NaN` and
+ * `retainFiles` made its file window compare false, which together prune EVERY
+ * archive. An invalid window now falls back to the built-in default (fail safe).
+ */
+describe('journal retention windows are validated', () => {
+  it('falls back to the built-in windows for a non-numeric value', () => {
+    for (const bad of ['30', NaN, 0, -1, Infinity, null, {}, true] as unknown[]) {
+      const { config } = mapLegacyConfig({ journal: { retainDays: bad, retainFiles: bad } })
+      expect(config.journal.retainDays, `retainDays=${String(bad)}`).toBe(DEFAULT_CONFIG.journal.retainDays)
+      expect(config.journal.retainFiles, `retainFiles=${String(bad)}`).toBe(DEFAULT_CONFIG.journal.retainFiles)
+    }
+  })
+
+  it('keeps a valid window and the journal booleans', () => {
+    const { config } = mapLegacyConfig({ journal: { enabled: false, allowCounters: false, retainDays: 7, retainFiles: 3 } })
+    expect(config.journal).toEqual({ enabled: false, allowCounters: false, retainDays: 7, retainFiles: 3 })
+  })
+
+  it('replaces only the window that was supplied', () => {
+    const { config } = mapLegacyConfig({ journal: { retainDays: 7 } })
+    expect(config.journal.retainDays).toBe(7)
+    expect(config.journal.retainFiles).toBe(DEFAULT_CONFIG.journal.retainFiles)
+  })
+
+  it('falls back for a non-boolean enabled/allowCounters', () => {
+    const { config } = mapLegacyConfig({ journal: { enabled: 'no', allowCounters: 0 } })
+    expect(config.journal.enabled).toBe(DEFAULT_CONFIG.journal.enabled)
+    expect(config.journal.allowCounters).toBe(DEFAULT_CONFIG.journal.allowCounters)
+  })
+})

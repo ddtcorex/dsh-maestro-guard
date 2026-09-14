@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { COUNTERS_RULE, type Journal, type JournalEntry } from './journal.js'
+import { type Journal, type JournalEntry } from './journal.js'
+import { RULE_IDS } from './rules.js'
 import type { GuardConfigV2 } from './config.js'
 import type { Tier } from './tiers.js'
 
@@ -12,6 +13,15 @@ export const RECENT_LIMIT = 20
  * than whatever the newest archive happens to hold.
  */
 export const STATS_LIMIT = 1000
+
+/**
+ * The rule ids a DECISION can carry — the closed `RULE_IDS` set. The journal
+ * also holds the guard's own bookkeeping rows (`counters`, `config-legacy`,
+ * `guard.migration`, `policy.deny`), whose ids are not rules: folding them into
+ * `byRule`/`byTier` would report decisions attributed to rule ids that exist
+ * nowhere in the rule table, and would invent one decision per counter flush.
+ */
+const DECISION_RULES = new Set<string>(RULE_IDS)
 
 export interface StatusResult {
   ok: true
@@ -78,12 +88,12 @@ export function createStatusTools(deps: StatusDeps): { status(): Promise<StatusR
         // entry carries no field at all, so reading `entry.rule` off it would
         // throw out of a tool that promises an empty-but-`ok` answer.
         if (entry === null || typeof entry !== 'object') continue
-        // The periodic counter aggregate is a METRICS row, not a decision: its
-        // rule id is `counters` and its tier `allow` is synthetic (allow
-        // decisions never reach the journal individually), so folding it in
-        // would invent one decision per flush and attribute it to a rule that
-        // does not exist in the rule table.
-        if (entry.rule !== COUNTERS_RULE) {
+        // Only a row whose rule is one of the closed rule ids is a DECISION.
+        // `counters` (the periodic aggregate), `config-legacy`, `guard.migration`
+        // and `policy.deny` are the guard's own bookkeeping: folding them in
+        // invented one decision per flush and attributed several to rule ids
+        // that are not in the rule table.
+        if (typeof entry.rule === 'string' && DECISION_RULES.has(entry.rule)) {
           bump(byRule, entry.rule)
           bump(byTier, entry.tier)
         }
@@ -186,7 +196,7 @@ export function applyStatusTools(ctx: Context, deps: StatusDeps): void {
 
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'maestro_guard_stats',
-    description: 'Aggregate the guard journal by rule, tier and outcome, with the ask-approval latency percentiles. Read-only.',
+    description: 'Aggregate the guard journal by rule, tier and outcome, with the ask-approval latency percentiles. Read-only. byRule/byTier count rule decisions only (the guard\'s own bookkeeping rows are excluded); byOutcome counts every row.',
     parameters: {},
     output: {
       schema: {
