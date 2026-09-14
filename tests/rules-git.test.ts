@@ -171,6 +171,18 @@ describe('gh release and branch-protection deletion', () => {
       tier: 'ask',
     })
   })
+  /**
+   * Fix round 2 finding 1: the shape gate moved onto the quote-stripped
+   * surface, but the branch LOCATOR is a target lookup, not a shape match — a
+   * quoted path (realistic: `{}`/`$VAR` are why people quote it) reduced the
+   * segment to `gh api -X DELETE`, found no branch and allowed the deletion.
+   */
+  it('asks before deleting a protected branch protection through a quoted path', () => {
+    expect(run('gh api -X DELETE "/repos/o/r/branches/main/protection"')).toMatchObject({
+      ruleId: 'gh.protection.delete',
+      tier: 'ask',
+    })
+  })
   it('does not ask for reading protection or for an unprotected branch', () => {
     expect(rule('gh api /repos/o/r/branches/main/protection')).toBe('')
     expect(rule('gh api -X DELETE /repos/o/r/branches/topic/protection')).toBe('')
@@ -238,5 +250,132 @@ describe('a publish word that is not the publish verb', () => {
       expect(run(cmd), cmd).toMatchObject({ ruleId: 'pkg.publish', tier: 'ask' })
     }
     expect(run('npm --prefix /d publish --dry-run')).toMatchObject({ ruleId: 'pkg.publish', tier: 'journal' })
+  })
+})
+
+/**
+ * Task B4 — cases the deleted suites pinned through the removed string matchers
+ * (`isBlockedGitCommand`, `getCommandWorkingDir`, `resolveCurrentBranch`,
+ * `checkSandbox`) are pinned here through `classify`, on parsed segments. This
+ * block is the home for `branch-scope`, `unknown-working-dir`, `command-scope`
+ * and the configuration-driven cases of `sandbox`.
+ */
+describe('the push is judged by the branch of the COMMAND target, not the session cwd', () => {
+  const withBranch = (command: string, cwd: string, branchOf: (dir: string) => string | undefined) =>
+    classify({ tool: 'bash', args: { command }, cwd, settings, branchOf })
+
+  it('allows a feature push in a cd target while the session cwd repo sits on master', () => {
+    const branchOf = (dir: string) => (dir === '/work/repo' ? 'feature/x' : dir === '/work' ? 'master' : undefined)
+    expect(withBranch('cd /work/repo && git push', '/work', branchOf).tier).not.toBe('ask')
+  })
+
+  it('asks when the cd target itself is checked out on a protected branch', () => {
+    const branchOf = (dir: string) => (dir === '/work/repo' ? 'master' : 'feature/x')
+    expect(withBranch('cd /work/repo && git push', '/work', branchOf)).toMatchObject({
+      ruleId: 'git.push.protected',
+      tier: 'ask',
+      repo: '/work/repo',
+      branch: 'master',
+    })
+  })
+
+  it('never consults the session cwd for a cd target it cannot read', () => {
+    const branchOf = (dir: string) => {
+      if (dir === '/work') throw new Error('session cwd consulted')
+      return undefined
+    }
+    // `cd "$REPO"` is unreadable, so the repo cannot be proven safe: fail closed
+    // with no branch, never by inheriting the session cwd's protected branch.
+    const v = withBranch('cd "$REPO" && git push', '/work', branchOf)
+    expect(v).toMatchObject({ ruleId: 'git.push.protected', tier: 'ask' })
+    expect(v.branch).toBeUndefined()
+    // An explicit feature refspec stays allowed regardless of the unreadable cd.
+    expect(withBranch('cd "$REPO" && git push -u origin feature/x', '/work', branchOf).tier).not.toBe('ask')
+  })
+})
+
+describe('the protected branch list is configuration', () => {
+  const custom = { protectedBranches: ['release'], protectedPaths: [], guardPaths: [] }
+  const runCustom = (command: string) =>
+    classify({ tool: 'bash', args: { command }, cwd: '/repo', settings: custom, branchOf: () => 'feature' })
+
+  it('gates exactly the configured branch, not a hard-coded master/main', () => {
+    expect(runCustom('git push origin main').tier).not.toBe('ask')
+    expect(runCustom('git push origin release')).toMatchObject({ ruleId: 'git.push.protected', tier: 'ask' })
+  })
+})
+
+describe('segmentation keeps a mention from hiding a protected operation', () => {
+  it('does not read a protected branch named in a later gh pr create segment as a push', () => {
+    expect(rule('cd /w && git push -u origin feature/x && gh pr create --base main --head feature/x --title t', 'feature')).toBe('')
+  })
+
+  it('keeps a merge and a protected push that share a chained command', () => {
+    expect(run('cd /w && git push -u origin feature/x && gh pr merge 6 --merge', 'feature').ruleId).toBe('git.merge.protected')
+    expect(run('git push origin master 2>&1 | tail -5', 'feature')).toMatchObject({
+      ruleId: 'git.push.protected',
+      tier: 'ask',
+    })
+  })
+})
+
+describe('release-tag pushes (deleted tag-protection suite)', () => {
+  it('asks for a prerelease tag refspec too', () => {
+    expect(run('git push origin v0.2.1-rc.2', 'feature')).toMatchObject({ ruleId: 'git.tag.release', tier: 'ask' })
+    expect(run('git push origin refs/tags/v0.2.1', 'feature')).toMatchObject({ ruleId: 'git.tag.release', tier: 'ask' })
+  })
+  it('leaves a branch named like a version alone', () => {
+    expect(run('git push -u origin feature/jobs-rpc-result-shape', 'feature').tier).not.toBe('ask')
+  })
+})
+
+/**
+ * Fix round 1 finding 1: the deleted `multiline-quoted` suite pinned an OUTCOME
+ * invariant, not only a mechanism — quoted DATA that merely mentions protected
+ * phrasings is never gated. Only the tokenizer half survived the deletion, and a
+ * quoted body still fired the raw-shape matchers: `node -e "… git push origin
+ * v1.0.0 …"` classified `git.tag.release`, and `gh pr create --body "… gh
+ * release create …"` classified `gh.release.create`. The batch contract is that
+ * quotes are data, so every raw-shape matcher reads the quote-stripped surface.
+ *
+ * The exception is pinned with it: when the verb RUNS its own argument
+ * (`ssh host "…"`, `script -c "…"`, `eval "…"`, `xargs`), the quoted span IS the
+ * command, and stripping it would turn the fail-closed ambiguity escalation into
+ * an allow.
+ */
+describe('quoted data never fires a raw-shape rule', () => {
+  const quotedTask = [
+    'TASK',
+    '1) cd /tmp && git push -u origin feature/x',
+    '2) cd /tmp && git push origin master',
+    '4) cd /tmp && git push origin v1.0.0',
+    'do not retry',
+  ].join('\n')
+
+  it('does not gate a multi-line quoted block that only mentions pushes and a tag', () => {
+    expect(run(`dsh --profile x "${quotedTask}"`)).toMatchObject({ ruleId: '', tier: 'allow' })
+    // The deleted suite's own first case: `pnpm dsh … "…"` resolves as a plain
+    // package-manager call, so it must stay quiet for the same reason.
+    expect(run(`pnpm dsh --profile x "${quotedTask}"`)).toMatchObject({ ruleId: '', tier: 'allow' })
+  })
+
+  it('does not gate a quoted multi-line program body mentioning a release tag', () => {
+    const program = ['runOne()', 'runTwo()', 'git push origin v1.0.0', 'end()'].join('\n')
+    expect(run(`node -e "${program}"`)).toMatchObject({ ruleId: '', tier: 'allow' })
+  })
+
+  it('does not read a quoted release phrase as the gh release command', () => {
+    expect(rule('gh pr create --body "gh release create v1"')).toBe('')
+    expect(rule('gh pr create --title t --body "line1\ngh release create v1\nline2"')).toBe('')
+  })
+
+  it('still asks for a real gh release command', () => {
+    expect(run('gh release create v1')).toMatchObject({ ruleId: 'gh.release.create', tier: 'ask' })
+    expect(run('bash -c "gh release create v1"')).toMatchObject({ ruleId: 'gh.release.create', tier: 'ask' })
+  })
+
+  it('keeps the quoted span gated when its verb runs the argument as a command', () => {
+    expect(run('ssh build-host "git push origin main"')).toMatchObject({ ruleId: 'git.push.protected', tier: 'ask' })
+    expect(run('eval "pnpm publish"')).toMatchObject({ ruleId: 'pkg.publish', tier: 'ask' })
   })
 })

@@ -1,16 +1,17 @@
 import type { Tier } from './tiers.js'
-import { parseCommand, unwrapSegments, type Segment } from './parse.js'
 import {
-  isBlockedPath,
-  isOutsideCwd,
-  isRuntimeSpillPath,
-  isWithinTempDir,
+  parseCommand,
+  unwrapSegments,
   extractCommandText,
   extractPathField,
   getCommandWorkingDir,
   stripQuoted,
   stripHeredocs,
-} from './sandbox.js'
+  EXEC_WRAPPERS,
+  OPAQUE_VERBS,
+  type Segment,
+} from './parse.js'
+import { isBlockedPath, isOutsideCwd, isRuntimeSpillPath, isWithinTempDir } from './paths.js'
 
 /**
  * The closed set of rule ids the classifier can emit (the empty id is the
@@ -126,7 +127,7 @@ const SEMVER_REF = /^v?\d+\.\d+\.\d+(?:[-+][0-9a-z.]+)?$/i
  * only when its own raw text carries one of these — otherwise `ssh host ls`
  * would prompt on every call. They are deliberately the same shapes the rule
  * layer resolves from a parsed segment, applied to the text the parser refused
- * to resolve.
+ * to resolve — read through `rawSurface`, so quoted data cannot fire one.
  */
 const RAW_GH_PR_MERGE = /\bgh\s+pr\s+merge\b/
 const RAW_GH_RELEASE = /\bgh\s+release\s+(?:create|publish)\b/i
@@ -150,6 +151,46 @@ function baseName(verb: string | undefined): string | undefined {
 function shellName(verb: string | undefined): string | undefined {
   const base = baseName(verb)
   return base !== undefined && SHELL_NAMES.has(base) ? base : undefined
+}
+
+/**
+ * True when a verb RUNS a command of its own: an exec-like wrapper the parser
+ * deliberately does not unwrap (`ssh host CMD`, `timeout 5 CMD`, `script -c
+ * CMD`) or an opaque runner (`eval`, `exec`, `xargs`). Both classes are exactly
+ * the segments the parser marks `ambiguous` on the verb alone, and in both the
+ * quoted span is the command being run, not data about it. The sets live in
+ * `parse.ts`, which owns the ambiguity classification.
+ */
+function runsOwnCommand(verb: string | undefined): boolean {
+  const base = baseName(verb)
+  return base !== undefined && (EXEC_WRAPPERS.has(base) || OPAQUE_VERBS.has(base))
+}
+
+/**
+ * The text a raw-shape matcher reads for one segment: `seg.raw` with its quoted
+ * spans collapsed, because the batch contract is that quotes are DATA. A quoted
+ * mention therefore never fires a rule — `gh pr create --body "gh release create
+ * v1"` is a description, and a quoted task or program body that happens to hold
+ * `git push origin v1.0.0` is text, not a push.
+ *
+ * The one exception is a verb that runs its own argument (`runsOwnCommand`):
+ * `ssh host "git push origin main"` really does push, so collapsing that quote
+ * would turn the fail-closed ambiguity escalation into an allow.
+ *
+ * KNOWN, DELIBERATE `allow` — interpreter inline programs: `python3 -c "…"`,
+ * `node -e "…"`, `perl -e "…"`, `php -r "…"` are not in either unwrap set, so
+ * the quoted program is data and a protected operation spelled inside it is
+ * allowed (`python3 -c "…os.system('git push origin master')"`). That is
+ * accepted rather than overlooked: an inline program is lexically
+ * indistinguishable from the `node -e` MENTION case the deleted
+ * `multiline-quoted` suite pinned as not-gated (`node -e "… git push origin
+ * v1.0.0 …"` must stay quiet), and the guard never reads a script file's
+ * contents either way — `python3 deploy.py` is equally opaque. Gating it would
+ * require the guard to interpret the interpreter's language. Task B5 must pin
+ * this residual as an explicit `allow` row in the golden corpus.
+ */
+function rawSurface(seg: Segment): string {
+  return runsOwnCommand(seg.verb) ? seg.raw : stripQuoted(seg.raw)
 }
 
 /** Both sides of a refspec: `+refs/heads/x:refs/heads/y` → `['x', 'y']`. */
@@ -251,11 +292,13 @@ function isGhPrMerge(seg: Segment): boolean {
  * `echo "gh release create v1"` stays data; a segment the parser could not
  * resolve is judged on its raw text — the same fail-closed reading every other
  * ambiguity escalation uses — because the command it really runs was never
- * parsed. Neither shape needs parser support beyond the segment boundary.
+ * parsed. Neither shape needs parser support beyond the segment boundary, and
+ * both read `rawSurface` so a quoted mention (`gh pr create --body "… gh release
+ * create …"`) cannot fire the rule it is describing.
  */
 function namesGhStatement(seg: Segment, shape: RegExp): boolean {
   if (!seg.ambiguous && baseName(seg.verb) !== 'gh') return false
-  return shape.test(seg.raw)
+  return shape.test(rawSurface(seg))
 }
 
 /**
@@ -263,6 +306,12 @@ function namesGhStatement(seg: Segment, shape: RegExp): boolean {
  * workspace relies on, so it asks. The branch set is the same one `git push`
  * uses; the match is a plain lowercased substring so a branch name carrying
  * regex characters cannot change the result.
+ *
+ * The shape gate reads `rawSurface` (quotes are data), but the branch LOCATOR is
+ * a target lookup, not a shape match: it must read the RAW segment text. People
+ * quote the path precisely because it is built (`{}`, `$VAR`, a URL), and on the
+ * stripped surface `gh api -X DELETE "<path>"` collapses to `gh api -X DELETE`,
+ * so the locator would find no branch and allow the deletion.
  */
 function deletesProtectedBranchProtection(seg: Segment, branches: string[]): boolean {
   if (!namesGhStatement(seg, RAW_GH_API_DELETE)) return false
@@ -343,11 +392,12 @@ function isRemoteExecPair(segs: Segment[], i: number): boolean {
 
 /**
  * The verdict for a segment the parser could not resolve: `ask` for the rule its
- * raw text names, `undefined` when it names none. This is the §5.3 escalation,
- * scoped so that an unresolved wrapper around a harmless command stays quiet.
+ * `rawSurface` names, `undefined` when it names none. This is the §5.3
+ * escalation, scoped so that an unresolved wrapper around a harmless command
+ * stays quiet.
  */
 function ambiguousVerdict(seg: Segment, command: string): Verdict | undefined {
-  const raw = seg.raw
+  const raw = rawSurface(seg)
   if (RAW_GH_PR_MERGE.test(raw)) return { ruleId: 'git.merge.protected', tier: 'ask', target: command }
   if (RAW_PUBLISH.test(raw)) return { ruleId: 'pkg.publish', tier: 'ask', target: command }
   if (RAW_GIT_PUSH.test(raw)) {
@@ -365,7 +415,7 @@ const ALLOW = (target: string): Verdict => ({ ruleId: '', tier: 'allow', target 
  * The executed command with quoted spans and heredoc bodies removed.
  * Access detection must run on this surface only: text quoted or piped into a
  * program as data is a mention, not an access. Reuses the single
- * `stripQuoted`/`stripHeredocs` implementations from `sandbox.ts` so the guard
+ * `stripQuoted`/`stripHeredocs` implementations from `parse.ts` so the guard
  * has exactly one definition of "what the command actually executes".
  */
 function accessSurface(command: string): string {
@@ -411,7 +461,7 @@ export function classify(ctx: ClassifyContext): Verdict {
     if (path && isBlockedPath(path, settings.protectedPaths)) {
       return { ruleId: 'secret.access', tier: 'ask', target: path }
     }
-    if (WRITE_FILE_TOOLS.has(tool) && path && cwd && isOutsideCwd(path, cwd) && !isWithinTempDir(path, cwd) && !isRuntimeSpillPath(path)) {
+    if (WRITE_FILE_TOOLS.has(tool) && path && cwd && isOutsideCwd(path, cwd) && !isWithinTempDir(path, cwd) && !isRuntimeSpillPath(path, cwd)) {
       return { ruleId: 'fs.write.outside', tier: 'ask', target: path }
     }
     // Tool content is never scanned — an analysis/write call is not an access.
@@ -419,9 +469,10 @@ export function classify(ctx: ClassifyContext): Verdict {
   }
 
   if (command) {
-    // secret.access on the executing command surface. This is a PATH rule and
-    // keeps its access-vs-mention matchers; B4 moves the path primitives into
-    // `paths.ts` and owns re-pointing them.
+    // secret.access on the executing command surface. This is a PATH rule: the
+    // primitives it reads live in `paths.ts` (`isBlockedPath` and the
+    // containment/exemption helpers), while the mention-vs-access verb tables
+    // below stay here with the rest of the rule layer.
     const segments = surface.split(/\s*(?:&&|\|\||;|\n)+\s*/)
     for (const seg of segments) {
       if (MENTION_VERBS.test(seg)) continue

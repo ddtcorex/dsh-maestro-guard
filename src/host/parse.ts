@@ -45,10 +45,16 @@
  * unwrap (`timeout`, `nice`, `setsid`, `watch`, …), which runs a command of its
  * own that would otherwise never reach a rule.
  *
- * Pure module: string in, data out. No filesystem, no child processes, no
- * network, and no expansion of `$VAR`/backticks — an unexpanded token is exactly
- * what `ambiguous` records.
+ * Pure with respect to the environment it inspects: string in, data out. It
+ * writes no file, starts no child process, opens no socket and never expands
+ * `$VAR`/backticks — an unexpanded token is exactly what `ambiguous` records.
+ * Reading the ambient environment is allowed where the caller cannot supply it:
+ * `node:os` `homedir()` and `node:path` resolve a `~`-relative `cd` target in
+ * `getCommandWorkingDir`, which is the only reason either is imported.
  */
+
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
 
 /** How many shell-wrapper levels `parseCommand` will descend before giving up. */
 export const MAX_WRAP_DEPTH = 3
@@ -77,7 +83,7 @@ export interface Segment {
 }
 
 /** Verbs whose meaning is entirely "run whatever the arguments say". */
-const OPAQUE_VERBS = new Set(['eval', 'exec', 'xargs'])
+export const OPAQUE_VERBS = new Set(['eval', 'exec', 'xargs'])
 
 /**
  * Verbs that run a trailing COMMAND of their own — after their own options and,
@@ -97,8 +103,11 @@ const OPAQUE_VERBS = new Set(['eval', 'exec', 'xargs'])
  * a remote runner (`ssh`), or a scheduler/multiplexer (`parallel`, `unbuffer`,
  * `script`, `caffeinate`). Leaving one out does not fail safe: the segment reads
  * as a resolved verb and the command it really runs never reaches a rule.
+ *
+ * Exported (with `OPAQUE_VERBS`) so the rule layer can tell which segments hold a
+ * COMMAND in their quoted spans rather than data — see `rawSurface` in `rules.ts`.
  */
-const EXEC_WRAPPERS = new Set([
+export const EXEC_WRAPPERS = new Set([
   'bwrap',
   'caffeinate',
   'chroot',
@@ -881,4 +890,83 @@ function unwrapSegment(seg: Segment, depth: number): Segment[] {
       (hasInterpreterScript(rest) || seg.heredoc !== undefined))
   if (stripped.dropped === 0 && !opaque) return [seg]
   return [rebuild(seg, rest, seg.ambiguous || opaque)]
+}
+
+/* ------------------------------------------------------------------ *
+ * Command and tool-argument interpretation
+ * ------------------------------------------------------------------ */
+
+/**
+ * Collapse quoted spans — text inside quotes is data (echo/printf/script
+ * bodies), not argv.
+ */
+export function stripQuoted(cmd: string): string {
+  return cmd.replace(/"[^"]*"/g, ' ').replace(/'[^']*'/g, ' ')
+}
+
+/**
+ * Collapse heredoc bodies — the lines fed to a command's stdin are data, not
+ * argv. A heredoc body routinely contains protected path literals (setup
+ * scripts, config generators) which must not be mistaken for an access.
+ * Run this AFTER `stripQuoted` so a quoted delimiter (`<<'EOF'`) is already
+ * reduced to its bare form.
+ */
+export function stripHeredocs(cmd: string): string {
+  return cmd.replace(/<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?[^\r\n]*\r?\n[\s\S]*?^\1\s*$/gm, ' ')
+}
+
+/**
+ * The executed command surface of a tool call. Shell-style tools carry their
+ * script in `args.command` (bash/exec/shell/govard_shell); bare string args are
+ * the command itself. Tools with no command field (read/write/memory/...) have
+ * no execution surface, so protected-op detection must not apply to their
+ * content — that was the source of the analysis-tool false positives.
+ */
+export function extractCommandText(args: unknown): string | undefined {
+  if (args == null) return undefined
+  if (typeof args === 'string') return args
+  if (typeof args === 'object' && typeof (args as Record<string, unknown>).command === 'string') {
+    return (args as Record<string, unknown>).command as string
+  }
+  return undefined
+}
+
+/**
+ * The path a file-oriented tool call targets, from the args shapes the DSH and
+ * Maestro file tools use (`path` / `file` / `file_path` / `filePath`, or a bare
+ * string arg). Returns undefined when the call carries no path.
+ */
+export function extractPathField(args: unknown): string | undefined {
+  if (args == null) return undefined
+  if (typeof args === 'string') return args
+  if (typeof args !== 'object') return undefined
+  const a = args as Record<string, unknown>
+  const v = a.path ?? a.file ?? a.file_path ?? a.filePath
+  return typeof v === 'string' ? v : undefined
+}
+
+/**
+ * Resolve the working directory a command actually executes in, when it names
+ * one explicitly (cd <dir> / git -C <dir>). Falls back to the passed cwd when
+ * the command has no explicit target — preserving the historical session-cwd
+ * semantics for commands that run in place.
+ */
+export function getCommandWorkingDir(command: string | undefined, cwd: string | undefined): string | undefined {
+  if (!command || !cwd) return cwd ?? undefined
+  const hasCdVerb = /\bcd\b/.test(command) || /\bgit\s+-C\b/.test(command)
+  const cd = /\bcd\s+([^\s;&|"'`${}]+)(?:\s*(?:[;&|]|$))/.exec(command)
+  const c = /\bgit\s+-C\s+([^\s;&|"'`${}]+)/.exec(command)
+  const dir = cd?.[1] ?? c?.[1]
+  if (!dir) {
+    // A cd/-C verb is present but its target cannot be parsed (quoted, $VAR,
+    // wildcard, bare `cd`): do NOT assume the session cwd — that reintroduces
+    // the false positive when the session cwd repo sits on a protected branch.
+    // Unknown target means no protected-branch assumption (segment word checks
+    // still apply); commands with no cd verb keep the session-cwd semantics.
+    if (hasCdVerb) return undefined
+    return cwd
+  }
+  if (dir === '~') return homedir()
+  if (dir.startsWith('~/')) return join(homedir(), dir.slice(2))
+  return resolve(cwd, dir)
 }

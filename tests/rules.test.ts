@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { classify, RULE_IDS, DEFAULT_TIERS } from '../src/host/rules.js'
 import type { RuleSettings } from '../src/host/rules.js'
-import { isWithinTempDir } from '../src/host/sandbox.js'
+import { isWithinTempDir, isRuntimeSpillPath } from '../src/host/paths.js'
 
 // Guard self-block protocol: protected path literals are assembled from
 // fragments at runtime so no tool call ever carries the contiguous literal.
@@ -137,6 +137,41 @@ describe('classify — the temp exemption shares the session-cwd base', () => {
   it('still exempts an absolute path inside os.tmpdir()', () => {
     const v = classify({ tool: 'write', args: { file_path: join(tmpdir(), 'scratch-notes.md'), content: 'x' }, cwd: '/repo', settings })
     expect(v.tier).toBe('allow')
+  })
+})
+
+/**
+ * Task B4 carried defect: `isRuntimeSpillPath` resolved a RELATIVE target
+ * against the host process cwd while `isWithinTempDir` already resolved against
+ * the session cwd, so the two exemptions could disagree about the same relative
+ * path. `classify` now passes the session cwd to both, exactly like the
+ * temp-dir helper.
+ */
+describe('classify — the runtime-spill exemption shares the session-cwd base', () => {
+  it('does not exempt a relative path that only looks like a spill from the host cwd', () => {
+    const hostCwd = process.cwd()
+    const spillFile = join(tmpdir(), 'dsh-spill-base-probe', 'session-1', 'x.txt')
+    const escape = relative(hostCwd, spillFile)
+    const sessionCwd = join(hostCwd, 'session', 'sub')
+
+    expect(isRuntimeSpillPath(escape), 'legacy base = process.cwd()').toBe(true)
+    expect(isRuntimeSpillPath(escape, sessionCwd), 'session-cwd base').toBe(false)
+
+    const v = classify({ tool: 'write', args: { file_path: escape, content: 'x' }, cwd: sessionCwd, settings })
+    expect(v).toMatchObject({ ruleId: 'fs.write.outside', tier: 'ask' })
+  })
+
+  it('still exempts an absolute spill path under os.tmpdir() for a writer', () => {
+    const spill = join(tmpdir(), 'dsh-spill-abc', 'session-1', 'x.txt')
+    const v = classify({ tool: 'write', args: { file_path: spill, content: 'x' }, cwd: '/repo', settings })
+    expect(v.tier).toBe('allow')
+  })
+
+  it('lets a read tool reach the spill dir the runtime disclosed (foundation retrieval flow)', () => {
+    const cwd = join(tmpdir(), 'maestro-mr-1137-3760-9b22ea39')
+    const spill = join(tmpdir(), 'dsh-spill-MbE4xz', 'session-45ea5295386a', 'de5c367ef79c-read.txt')
+    expect(classify({ tool: 'read', args: { file_path: spill }, cwd, settings }).tier).toBe('allow')
+    expect(classify({ tool: 'maestro_read_file', args: { path: spill }, cwd, settings }).tier).toBe('allow')
   })
 })
 

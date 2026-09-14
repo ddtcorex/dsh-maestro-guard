@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { parseCommand, MAX_WRAP_DEPTH } from '../src/host/parse.js'
+import {
+  parseCommand,
+  MAX_WRAP_DEPTH,
+  extractCommandText,
+  extractPathField,
+  getCommandWorkingDir,
+} from '../src/host/parse.js'
 
 // Task B1: the guard stops matching regular expressions against the raw command
 // string and starts reading a parsed command surface instead. The parser is
@@ -169,6 +175,21 @@ describe('tokenizer', () => {
   it('keeps a quoted operator inside a single token', () => {
     expect(parseCommand('echo "a | b"')[0].argv).toEqual(['echo', 'a | b'])
   })
+  // Deleted `multiline-quoted` suite: the old string matcher split a quoted
+  // block on the separators INSIDE it before stripping quotes, exposing the
+  // phrasings as if they were argv. The tokenizer cannot fragment it — a quoted
+  // newline, `&&` and `;` all stay inside one token of one segment.
+  it('keeps a quoted multiline block in a single token and segment', () => {
+    const data = 'pnpm dsh --profile x "TASK\n1) cd /tmp && git push -u origin feat/x\ndo not retry"'
+    const segs = parseCommand(data)
+    expect(segs).toHaveLength(1)
+    expect(segs[0].argv).toContain('TASK\n1) cd /tmp && git push -u origin feat/x\ndo not retry')
+  })
+  it('keeps a quoted program body in a single segment', () => {
+    const segs = parseCommand('node -e "runOne()\nrunTwo()\ngit push origin v1.0.0\nend()"')
+    expect(segs).toHaveLength(1)
+    expect(segs[0].verb).toBe('node')
+  })
   it('strips quotes but keeps their content intact', () => {
     expect(parseCommand("git commit -m 'fix: a && b'")[0].argv).toContain('fix: a && b')
   })
@@ -254,5 +275,61 @@ describe('ambiguity is fail-closed', () => {
   })
   it('does not mark an escaped backtick ambiguous', () => {
     expect(parseCommand('echo \\`pwd\\`')[0].ambiguous).toBe(false)
+  })
+})
+
+// Task B4: interpreting a command/args is the parser's job, not a path rule's.
+// The tool-argument extractors moved here from the deleted `sandbox.ts`; the
+// working-directory helper follows, because it reads `cd`/`git -C` out of the
+// command text — the same surface `parseCommand` reads.
+describe('tool-argument extractors', () => {
+  it('extractCommandText returns the command field of shell-style args', () => {
+    expect(extractCommandText({ command: 'git push origin feature', description: 'x' })).toBe('git push origin feature')
+  })
+  it('extractCommandText passes through bare string args', () => {
+    expect(extractCommandText('git push origin feature')).toBe('git push origin feature')
+  })
+  it('extractCommandText returns undefined for non-shell tool args', () => {
+    expect(extractCommandText({ file_path: '/a', content: 'mention git push' })).toBeUndefined()
+    expect(extractCommandText({ command: 42 })).toBeUndefined()
+    expect(extractCommandText(undefined)).toBeUndefined()
+  })
+  it('extractPathField reads every path key the file tools use', () => {
+    expect(extractPathField({ path: '/a' })).toBe('/a')
+    expect(extractPathField({ file: '/b' })).toBe('/b')
+    expect(extractPathField({ file_path: '/c' })).toBe('/c')
+    expect(extractPathField({ filePath: '/d' })).toBe('/d')
+    expect(extractPathField('/e')).toBe('/e')
+  })
+  it('extractPathField returns undefined when no path is carried', () => {
+    expect(extractPathField({ content: 'x' })).toBeUndefined()
+    expect(extractPathField({ path: 42 })).toBeUndefined()
+    expect(extractPathField(null)).toBeUndefined()
+  })
+})
+
+describe('getCommandWorkingDir', () => {
+  it('extracts an absolute cd target from a chained command', () => {
+    expect(getCommandWorkingDir('cd /work/repo && git push -u origin feat/x 2>&1 | tail -5', '/work')).toBe('/work/repo')
+  })
+  it('resolves a relative cd against the session cwd', () => {
+    expect(getCommandWorkingDir('cd packages/jobs && git push -u origin feat/x', '/work')).toBe('/work/packages/jobs')
+  })
+  it('handles the git -C form', () => {
+    expect(getCommandWorkingDir('git -C /work/repo push origin feat/x', '/work')).toBe('/work/repo')
+  })
+  it('falls back to the session cwd only when no cd target is present', () => {
+    expect(getCommandWorkingDir('git push origin feat/x', '/work')).toBe('/work')
+    expect(getCommandWorkingDir(undefined, '/work')).toBe('/work')
+    expect(getCommandWorkingDir('cd /x && git push', undefined)).toBeUndefined()
+  })
+  // Residual false-positive class from the audit: an unreadable cd target must
+  // not inherit the session cwd, or a session whose cwd repo sits on a protected
+  // branch keeps blocking feature pushes written as `cd "$REPO" && git push …`.
+  it('returns undefined for a quoted cd target', () => {
+    expect(getCommandWorkingDir('cd "$REPO" && git push -u origin feat/x', '/work')).toBeUndefined()
+  })
+  it('returns undefined for a $VAR cd target', () => {
+    expect(getCommandWorkingDir('cd $REPO_DIR && git push -u origin feat/x', '/work')).toBeUndefined()
   })
 })

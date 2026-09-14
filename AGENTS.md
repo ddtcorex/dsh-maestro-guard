@@ -22,9 +22,8 @@ Part of the Maestro Harness suite. No client bundle — everything runs in the N
 - `src/host/tiers.ts` — the `Tier` union (`allow` | `journal` | `ask` | `deny`) and its `TIERS` list.
 - `src/host/rules.ts` — `classify()`: the rule ids (`RULE_IDS`), `DEFAULT_TIERS`, and the parsed command-surface / file-path checks that produce a `Verdict`.
 - `src/host/decide.ts` — `decide()` (the enforced tier after `domains.guard.rules` overrides; `deny` is a structural floor) and `renderReason()`.
-- `src/host/sandbox.ts` — path/branch/command primitives (`isBlockedPath`, `isBlockedGitCommand`, `stripQuoted`, `stripHeredocs`, `extractCommandText`, `extractPathField`, `getCommandWorkingDir`, …).
-- `src/sandbox.ts` — thin re-export of `src/host/sandbox.ts` kept for older imports.
-- `src/host/paths.ts` — `defaultProtectedPaths()` / `guardConfigPaths()` factories (thin shim; the path rules themselves still live in `sandbox.ts`).
+- `src/host/parse.ts` — the shell-aware tokenizer/segmenter (`parseCommand`, `unwrapSegments`) plus the command/argument interpretation helpers (`extractCommandText`, `extractPathField`, `getCommandWorkingDir`, `stripQuoted`, `stripHeredocs`); pure — no filesystem.
+- `src/host/paths.ts` — the path rules: `defaultProtectedPaths()` / `guardConfigPaths()` and the primitives `classify` consumes (`isBlockedPath`, `isOutsideCwd`, `isRuntimeSpillPath`, `isWithinTempDir`). The always-blocked path names are assembled from string fragments, because the OLD 0.2.3 guard is still the live listener and blocks any tool call carrying one contiguously.
 - `src/host/config.ts` — `GuardConfigV2`, `DEFAULT_CONFIG`, `mergeGuardConfig()`, `loadGuardConfig()` over `domains.guard`.
 - `src/host/journal.ts` — `Journal`, `journalDir()`, `journalPath()`; one JSON line per decision with **every string field redacted inside `append()`** (the single choke point — callers pass raw verdict fields), never throws.
 - `src/host/redact.ts` — `containsSecret()` / `redact()`: the secret families and prefix-keeping patterns, applied to journal copies only.
@@ -32,7 +31,7 @@ Part of the Maestro Harness suite. No client bundle — everything runs in the N
 - `src/host/permission-policy.ts` — `PermissionPolicy`: pure allow/deny check on the tool name.
 - `src/host/full-scan-tool.ts` — the on-demand full-scan tool registration.
 - `src/host/augment.d.ts` — local structural types for the DSH tool-execution contract and the `tools/pre-execute` event (do NOT import from `deepseek-harness`).
-- `tests/*.test.ts` — 16 vitest suites: guard, guard-handler, rules, decide, journal, migrate, redact, permission, paths, sandbox, branch-scope, command-scope, unknown working-dir, tag protection, multiline-quoted, full-scan-tool.
+- `tests/*.test.ts` — 14 vitest suites: guard, guard-handler, rules, rules-git, rules-paths, parse, parse-wrappers, decide, journal, migrate, redact, permission, paths, full-scan-tool.
 
 ## Decision tiers & approval
 
