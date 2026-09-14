@@ -8,6 +8,7 @@ import { decide, renderReason } from './decide.js'
 import { DEFAULT_CONFIG, loadGuardConfig, loadGuardConfigWithMigration, type GuardConfigV2 } from './config.js'
 import { retireLegacyStore } from './migrate.js'
 import { apply as applyFullScan } from './full-scan-tool.js'
+import { applyStatusTools } from './status-tool.js'
 import type { GuardToolExecution, GuardPreToolDecision } from './augment.js'
 
 export interface GuardDeps {
@@ -188,5 +189,9 @@ export default {
     ctx.effect(() => { void journalConfigMigration(journal, boot.migratedKeys); return () => {} }, 'guard-journal-legacy-config')
     // register on-demand full-scan tool (Task 4) alongside guard handler
     applyFullScan(ctx, {})
+    // Read-only introspection of the journal the handler above writes: the
+    // recent decisions plus the aggregate counters. Registered after the flush
+    // wiring, each registration its own reversible effect (see the module).
+    applyStatusTools(ctx, { journal, config: loadGuardConfig })
   },
 }

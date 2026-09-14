@@ -113,16 +113,30 @@ export class Journal {
   private counters = new Map<string, number>()
 
   /** Boot-time gates derived from {@link JournalOptions}. */
-  private readonly enabled: boolean
+  private readonly writesEnabled: boolean
   private readonly allowCounters: boolean
 
   constructor(private dshHome?: string, private now: () => number = Date.now, private opts: JournalOptions = {}) {
-    this.enabled = opts.enabled !== false
+    this.writesEnabled = opts.enabled !== false
     this.allowCounters = opts.allowCounters !== false
   }
 
+  /** The journal file this instance reads and appends (`journalPath` for its home). */
+  get path(): string {
+    return journalPath(this.dshHome)
+  }
+
+  /**
+   * The boot-time write gate. Exposed because the status tool must report what
+   * this instance actually does — not a second reading of the config block,
+   * which could disagree with the journal a long-running host already built.
+   */
+  get enabled(): boolean {
+    return this.writesEnabled
+  }
+
   async append(entry: Omit<JournalEntry, 'ts' | 'redacted'>): Promise<void> {
-    if (!this.enabled) return
+    if (!this.writesEnabled) return
     try {
       // Serialization is inside the try too: an unserializable field (BigInt, a
       // circular reference) or a throwing clock must not break the never-throw
@@ -171,42 +185,49 @@ export class Journal {
 
   /**
    * The recent journal, NEWEST FIRST. The live file is the newest source, so it
-   * is read after the newest archive; `limit` keeps the most recent entries
-   * only. A missing directory, a missing file or a torn line is skipped rather
-   * than thrown — a reader must not be able to break the guard.
+   * is read first, then the archives newest → oldest; `limit` keeps the most
+   * recent entries only and stops the walk as soon as it is satisfied. The walk
+   * must cross archives: reading the newest one alone would answer a
+   * `read(1000)` with a single day of history. A missing directory, a missing
+   * file or a torn line is skipped rather than thrown — a reader must not be
+   * able to break the guard.
    */
   async read(limit: number = DEFAULT_READ_LIMIT): Promise<JournalEntry[]> {
     if (!Number.isFinite(limit) || limit <= 0) return []
     const dir = journalDir(this.dshHome)
-    const sources: string[] = []
+    // Newest source first. The live file is newest; the archives follow, newest
+    // to oldest, so stopping at `limit` has still seen the newest entries.
+    const sources: string[] = [journalPath(this.dshHome)]
     try {
       const archives = (await readdir(dir)).map(parseArchive).filter((a): a is ArchiveRef => a !== undefined).sort(byAge)
-      const newest = archives[archives.length - 1]
-      if (newest) sources.push(join(dir, newest.name))
+      for (let i = archives.length - 1; i >= 0; i--) sources.push(join(dir, archives[i].name))
     } catch {
       // No journal directory yet: the live read below still applies.
     }
-    sources.push(journalPath(this.dshHome))
     const entries: JournalEntry[] = []
     for (const p of sources) {
+      if (entries.length >= limit) break
       let text: string
       try {
         text = await readFile(p, 'utf8')
       } catch {
         continue
       }
-      for (const line of text.split('\n')) {
+      const lines = text.split('\n')
+      // Newest line of this source first: a torn trailing line is skipped
+      // before the complete lines of the same file are kept.
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i]
         if (!line.trim()) continue
         try {
           entries.push(JSON.parse(line) as JournalEntry)
         } catch {
-          // A half-written trailing line is not an error for a reader.
+          // A half-written line is not an error for a reader.
         }
+        if (entries.length >= limit) break
       }
     }
-    // `entries` is chronological (oldest archive first, live file last); keep
-    // the newest `limit` and reverse them into the newest-first contract.
-    return entries.slice(-limit).reverse()
+    return entries
   }
 
   /**
@@ -285,7 +306,7 @@ export class Journal {
    * host process alive. A disabled journal starts no timer at all.
    */
   startFlush(intervalMs: number): () => void {
-    if (!this.enabled) return () => {}
+    if (!this.writesEnabled) return () => {}
     const timer = setInterval(() => {
       void this.flushCounters()
     }, intervalMs)

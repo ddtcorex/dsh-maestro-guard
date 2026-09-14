@@ -202,6 +202,24 @@ describe('journal counters and retention', () => {
     expect(await new Journal(await tempDir()).read()).toEqual([])
   })
 
+  it('walks the archives newest to oldest instead of stopping at the newest', async () => {
+    const dir = await tempDir()
+    const archives = journalDir(dir)
+    await mkdir(archives, { recursive: true })
+    // Two archived days and no live file: the older day is only reachable by
+    // walking past the newest archive.
+    await writeFile(join(archives, 'journal-2026-09-12.jsonl'), '{"rule":"older"}\n')
+    await writeFile(join(archives, 'journal-2026-09-13.jsonl'), '{"rule":"newer"}\n')
+    const j = new Journal(dir, () => NOW)
+    expect((await j.read()).map((e) => e.rule)).toEqual(['newer', 'older'])
+    // The limit still keeps the newest entries and stops the walk early.
+    expect((await j.read(1)).map((e) => e.rule)).toEqual(['newer'])
+    // A torn line inside an archive is skipped, not thrown, and the older
+    // archive is still reached afterwards.
+    await writeFile(join(archives, 'journal-2026-09-13.jsonl'), '{"rule":"newer"}\n{"rule":\n')
+    expect((await j.read()).map((e) => e.rule)).toEqual(['newer', 'older'])
+  })
+
   it('flushes on an interval and stops on dispose', async () => {
     const dir = await tempDir()
     const j = new Journal(dir)
@@ -252,9 +270,9 @@ describe('journal counters and retention', () => {
     const payloads = (await Promise.all(rolled.map((f) => readFile(join(archives, f), 'utf8')))).join('')
     expect(payloads).toContain('"rule":"early"')
     expect(payloads).toContain('"rule":"late"')
-    // `read()` reaches the newest archive only; both archives on disk is the
-    // no-data-loss contract this test is about.
-    expect((await j.read()).map((e) => e.rule)).toEqual(['late'])
+    // `read()` walks BOTH archives newest-first (the second roll lives in
+    // `journal-2026-09-14-1.jsonl`), so neither day of history is invisible.
+    expect((await j.read()).map((e) => e.rule)).toEqual(['late', 'early'])
   })
 
   it('keeps the collision fallback archive readable', async () => {
