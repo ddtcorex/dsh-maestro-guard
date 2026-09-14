@@ -89,6 +89,25 @@ export function journalPath(dshHome?: string): string {
 }
 
 /**
+ * The boot-rotate decision: roll the live journal when its last write landed on
+ * an earlier UTC day than the current clock. The live file carries no date in
+ * its name (`journal.jsonl`), so the day is read from its mtime — one `stat`,
+ * no file read. `undefined` (no live file) is never a rotation: a boot with
+ * nothing recorded must not create an empty archive, and a missing file must
+ * never fail boot. UTC, because that is the day `freeArchivePath` names archives
+ * by.
+ */
+export function shouldRotateAtBoot(liveMtimeMs: number | undefined, now: number): boolean {
+  if (liveMtimeMs === undefined || !Number.isFinite(liveMtimeMs)) return false
+  return dayOf(liveMtimeMs) !== dayOf(now)
+}
+
+/** The `YYYY-MM-DD` UTC day a timestamp falls in — the archive naming unit. */
+function dayOf(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10)
+}
+
+/**
  * Rotations are serialized through one in-flight promise chain (the idiom the
  * deleted `pending.ts` used for its store writes). `freeArchivePath` is a
  * stat-then-rename, so two overlapping calls would both pick the same free
@@ -319,9 +338,55 @@ export class Journal {
     }
   }
 
+  /**
+   * The BOOT roll: rotate when the live file's last write predates today, so
+   * the archive set — and the retention windows that prune it — advances even
+   * on a host that restarts daily. One `stat` is the only I/O; a missing live
+   * file, or one already written today, is a silent no-op. A disabled journal
+   * rolls nothing, the same rule `append` and `startFlush` follow.
+   *
+   * The roll is named by the rotation clock (today), like every other rotation;
+   * the file's contents are whatever accumulated since the last roll, so the
+   * archive day is the day the archive was made, never a claim about its
+   * contents.
+   */
+  async rotateIfStale(): Promise<string[]> {
+    if (!this.writesEnabled) return []
+    let mtimeMs: number | undefined
+    try {
+      mtimeMs = (await stat(journalPath(this.dshHome))).mtimeMs
+    } catch {
+      // No live file: nothing to roll, and boot must not fail on it.
+      return []
+    }
+    if (!shouldRotateAtBoot(mtimeMs, this.now())) return []
+    return this.rotate()
+  }
+
+  /**
+   * Rotate once per `intervalMs` (default: one day) and return the disposer that
+   * stops it. This is what makes `retainFiles`/`retainDays` take effect on a
+   * long-running host, not just at boot. The timer is unref'd so a pending roll
+   * never keeps the host process alive, and a disabled journal starts no timer
+   * at all — the same reversible-disposer discipline as {@link startFlush}.
+   */
+  startDailyRotation(intervalMs: number = DAY_MS): () => void {
+    if (!this.writesEnabled) return () => {}
+    const timer = setInterval(() => {
+      void this.rotate()
+    }, intervalMs)
+    ;(timer as { unref?: () => void }).unref?.()
+    let stopped = false
+    return () => {
+      if (stopped) return
+      stopped = true
+      clearInterval(timer)
+    }
+  }
+
   /** The first unused `journal-<today>[-<n>].jsonl` under `dir`. */
   private async freeArchivePath(dir: string): Promise<string> {
-    const date = new Date(this.now()).toISOString().slice(0, 10)
+    const date = dayOf(this.now())
     for (let seq = 0; seq < 1000; seq++) {
       const name = seq === 0 ? `journal-${date}.jsonl` : `journal-${date}-${seq}.jsonl`
       const candidate = join(dir, name)

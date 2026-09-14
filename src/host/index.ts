@@ -54,6 +54,9 @@ export function createGuardHandler(deps: GuardDeps) {
       protectedBranches: cfg.protectedBranches,
       protectedPaths: cfg.protectedPaths,
       guardPaths: cfg.guardPaths,
+      // Part of the per-call read (unlike the boot-time journal block), so a
+      // `workingDirContainment` change takes effect on the next tool call.
+      workingDirContainment: cfg.workingDirContainment,
     }
     const verdict = classify({ tool, args, cwd, settings, branchOf: deps.branchOf })
     const { tier } = decide(verdict, cfg.rules)
@@ -183,6 +186,16 @@ export default {
     // off the decision path. The effect disposes the timer on unload, and a
     // journal disabled by config starts no timer at all (`startFlush` is a no-op).
     ctx.effect(() => { const stop = journal.startFlush(60_000); return () => stop() }, 'guard-journal-counter-flush')
+    // Retention used to depend on a caller that never existed, so the live file
+    // grew without bound and `retainFiles`/`retainDays` never applied. The boot
+    // roll advances the archive day when the host was down across midnight; the
+    // daily roll keeps a long-running host on the same schedule. Both are
+    // reversible, and a disabled journal schedules nothing.
+    ctx.effect(() => {
+      void journal.rotateIfStale()
+      const stop = journal.startDailyRotation()
+      return () => stop()
+    }, 'guard-journal-rotation')
     ctx.effect(() => { void retireLegacyStore(journal); return () => {} }, 'guard-retire-legacy-store')
     // Journal the v1 -> v2 config migration once per boot, from the boot read
     // above; the per-call read stays the cheap `loadGuardConfig`.

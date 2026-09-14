@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, utimes, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
-import { Journal, journalDir, journalPath } from '../src/host/journal.js'
+import { Journal, journalDir, journalPath, shouldRotateAtBoot } from '../src/host/journal.js'
 
 /** A fixed clock: the archives below are all dated in August 2026. */
 const NOW = Date.parse('2026-09-14T00:00:00Z')
@@ -372,5 +372,83 @@ describe('journal counters and retention', () => {
     expect((await quiet.call(exec, deny)).kind).toBe('deny')
     expect(existsSync(journalPath(quietHome))).toBe(false)
     quiet.dispose()
+  })
+})
+
+/**
+ * Task C3 fix round 1 — retention never ran: `rotate()` had no production
+ * caller, so the live journal grew unbounded and `retainFiles`/`retainDays`
+ * never took effect. `apply()` now rolls once at boot when the live file
+ * predates today and schedules a daily roll, both under the same reversible
+ * disposer discipline as the counter flush.
+ */
+describe('boot-time and daily retention', () => {
+  const YESTERDAY_UTC = Date.parse('2026-09-13T12:00:00Z')
+  const TODAY_UTC = Date.parse('2026-09-14T06:00:00Z')
+
+  it('decides the boot roll from the live file mtime day', () => {
+    // The live file carries no date in its name, so the day comes from mtime.
+    expect(shouldRotateAtBoot(YESTERDAY_UTC, NOON)).toBe(true)
+    expect(shouldRotateAtBoot(TODAY_UTC, NOON)).toBe(false)
+    // A missing file (no mtime) is never a rotation: nothing to roll.
+    expect(shouldRotateAtBoot(undefined, NOON)).toBe(false)
+  })
+
+  it('rolls a live file dated yesterday and leaves a current one alone', async () => {
+    const dir = await tempDir()
+    const j = new Journal(dir, () => NOON)
+
+    // Missing: silent no-op — a boot with nothing recorded creates no archive.
+    expect(await j.rotateIfStale()).toEqual([])
+    expect(existsSync(journalPath(dir))).toBe(false)
+
+    // Last written yesterday: rolled into the dated archive, not copied.
+    await j.append({ tool: 'bash', rule: 'stale', tier: 'journal', target: 'a', outcome: 'passed' })
+    await utimes(journalPath(dir), YESTERDAY_UTC / 1000, YESTERDAY_UTC / 1000)
+    expect(await j.rotateIfStale()).toEqual([])
+    expect(await readdir(journalDir(dir))).toContain('journal-2026-09-14.jsonl')
+    expect(existsSync(journalPath(dir))).toBe(false)
+
+    // Written today: untouched, so the archive and the live file both survive.
+    await j.append({ tool: 'bash', rule: 'current', tier: 'journal', target: 'b', outcome: 'passed' })
+    await utimes(journalPath(dir), TODAY_UTC / 1000, TODAY_UTC / 1000)
+    expect(await j.rotateIfStale()).toEqual([])
+    expect(existsSync(journalPath(dir))).toBe(true)
+    expect((await j.read()).map((e) => e.rule)).toEqual(['current', 'stale'])
+  })
+
+  it('rotates nothing when the journal is disabled', async () => {
+    const dir = await tempDir()
+    await mkdir(journalDir(dir), { recursive: true })
+    await writeFile(journalPath(dir), '{"rule":"stale"}\n')
+    await utimes(journalPath(dir), YESTERDAY_UTC / 1000, YESTERDAY_UTC / 1000)
+    const j = new Journal(dir, () => NOON, { enabled: false })
+    expect(await j.rotateIfStale()).toEqual([])
+    expect(existsSync(journalPath(dir))).toBe(true)
+  })
+
+  it('rotates on a daily interval and stops on dispose', async () => {
+    const dir = await tempDir()
+    const j = new Journal(dir)
+    vi.useFakeTimers()
+    const rotate = vi.spyOn(j, 'rotate').mockResolvedValue([])
+    const stop = j.startDailyRotation()
+    vi.advanceTimersByTime(86_400_000 * 2 + 1)
+    expect(rotate).toHaveBeenCalledTimes(2)
+    stop()
+    stop() // idempotent
+    vi.advanceTimersByTime(86_400_000 * 2)
+    expect(rotate).toHaveBeenCalledTimes(2)
+  })
+
+  it('starts no daily timer when the journal is disabled', async () => {
+    const dir = await tempDir()
+    const j = new Journal(dir, () => NOON, { enabled: false })
+    vi.useFakeTimers()
+    const rotate = vi.spyOn(j, 'rotate').mockResolvedValue([])
+    const stop = j.startDailyRotation()
+    vi.advanceTimersByTime(86_400_000 * 3)
+    expect(rotate).not.toHaveBeenCalled()
+    stop()
   })
 })

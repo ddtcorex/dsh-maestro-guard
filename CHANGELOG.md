@@ -15,9 +15,11 @@ All notable changes to this project are documented in this file. Format follows
   and each rule's tier is overridable from `domains.guard.rules`.
 - Command classification is now parsed instead of regex-matched. A shell-aware
   tokenizer/segmenter splits the command on operators that sit outside quotes, keeps every word
-  and redirection, and marks anything it cannot resolve as ambiguous — ambiguity is never
-  resolved to an allow. This closes the value-taking-global-option bypass
-  (`git -C /repo push origin v1.2.3`, `pnpm --dir /repo publish`, `npm --prefix … publish`),
+  and redirection, and marks anything it cannot resolve as ambiguous. An ambiguous segment is
+  escalated whenever its unresolved text names a rule verb the guard can act on; when it names
+  none it stays an `allow`, and quoted or inline program text is deliberately data (the corpus
+  pins the `python3 -c "…"` inline-program allow). This closes the value-taking-global-option
+  bypass (`git -C /repo push origin v1.2.3`, `pnpm --dir /repo publish`, `npm --prefix … publish`),
   where the old matcher never saw the subcommand.
 - Shell wrappers are unwrapped: `env VAR=…`, `sudo`, `nohup` and `time` are peeled off, and a
   shell wrapper (`bash -c <script>`, `bash -s`, a `bash <<EOF` body) is replaced by the script it
@@ -36,11 +38,13 @@ All notable changes to this project are documented in this file. Format follows
   the pattern set covers registry tokens, env assignments, auth headers and private keys.
 - Fail-closed by construction: a session whose approval policy never prompts is denied with an
   actionable message.
-- The journal is now rotatable and retention-pruned: `Journal.rotate()` archives the live file as
+- The journal is now rotatable and retention-pruned. `Journal.rotate()` archives the live file as
   `journal-YYYY-MM-DD.jsonl` (serialized, so overlapping calls cannot collide on the name) and
   removes archived files only once they fall outside BOTH the file-count and the age window.
-  Ordinary (`allow`) decisions stay in memory and reach disk as one periodic `counters`
-  aggregate line, so they never sit on the decision path.
+  Rotation is driven by the guard itself: once at boot when the live file's last write predates
+  today, then once a day, so the live file stays bounded and the retention knobs apply on a host
+  that never restarts. Ordinary (`allow`) decisions stay in memory and reach disk as one periodic
+  `counters` aggregate line, so they never sit on the decision path.
 
 ### Added
 - `~/.dsh/dsh-maestro-guard/journal.jsonl` — durable per-decision record.
@@ -59,6 +63,11 @@ All notable changes to this project are documented in this file. Format follows
 - `domains.guard.journal` knobs — `enabled` (disable journaling), `allowCounters` (stop counting
   `allow` decisions) and the retention window `retainFiles` (default 14) / `retainDays`
   (default 30). They are read once at boot, so changing them needs a host restart.
+- `domains.guard.workingDirContainment` is honoured rather than merely documented: `enabled`
+  (default `true`) switches the `fs.write.outside` rule on and off, and `spillReads` (default
+  `true`) keeps the runtime spill dir exempt from it — with `spillReads: false` a spill-dir write
+  is gated like any other write outside the session cwd. Read per call, so it applies from the
+  next tool call.
 
 ### Removed
 - `pending.json` ticket store, the approve/list tools and the unused approval store. A legacy

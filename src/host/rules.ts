@@ -48,10 +48,29 @@ export const DEFAULT_TIERS: Record<string, Tier> = {
   'guard.tamper': 'deny',
 }
 
+/**
+ * The `domains.guard.workingDirContainment` block after config merge. Both
+ * switches default to `true` in `DEFAULT_CONFIG`, so an absent block here is
+ * read as the documented default (containment ON) rather than as an escape
+ * hatch — a caller that cannot read config must never disarm the rule.
+ */
+export interface WorkingDirContainmentSettings {
+  /** `false` disables the `fs.write.outside` rule entirely. */
+  enabled?: boolean
+  /** `false` removes the runtime-spill exemption (the OS temp exemption stays). */
+  spillReads?: boolean
+}
+
 export interface RuleSettings {
   protectedBranches: string[]
   protectedPaths: string[]
   guardPaths: string[]
+  /**
+   * Optional so a direct `classify` caller (tests, tools) that has no config
+   * reading still gets the safe default; `index.ts` always threads the merged
+   * `domains.guard` block through.
+   */
+  workingDirContainment?: WorkingDirContainmentSettings
 }
 
 export interface Verdict {
@@ -83,20 +102,31 @@ const FILE_TOOLS = new Set([
   'write_file',
 ])
 const WRITE_FILE_TOOLS = new Set(['write', 'edit', 'maestro_write_file', 'fs_write', 'write_file'])
+/** Verbs that actually touch file contents — a protected path next to one is an access. */
+const ACCESS_VERBS = /\b(cat|bat|head|tail|less|more|cp|scp|rsync|curl|wget|source|tee|dd|install|xxd|base64|openssl|gpg|tar|zip)\b/
+/** Verbs that only scan/print the argument itself — mentioning a path is not reading it. */
+const MENTION_VERBS = /^\s*(grep|egrep|fgrep|rg|sed|awk|echo|printf|find|ls|test|wc|sort|uniq|jq)\b/
+
 /**
  * `fs.write.outside` covers the whole write family — the DSH-native `write` and
  * `edit` tools as well as the legacy Maestro writers. Scoping the rule to the
  * legacy names alone is what made the original cwd containment inert: the tools
  * actually in use (`read`/`write`/`edit`) were never matched. The OS temp dir is
  * exempt (`isWithinTempDir`) so scratch work stays frictionless; the runtime
- * spill dir is a subdirectory of it and keeps its explicit exemption. The temp
- * exemption is resolved against the SAME base as the containment test — the
- * session cwd — so the two can never disagree about a relative target.
+ * spill dir is a subdirectory of it and keeps its explicit exemption while
+ * `workingDirContainment.spillReads` is on. Both exemptions are resolved against
+ * the SAME base as the containment test — the session cwd — so the two can never
+ * disagree about a relative target.
+ *
+ * The spill switch is why {@link isExemptWritePath} tests the spill path BEFORE
+ * the temp dir: the spill dir lives under `os.tmpdir()`, so testing the temp
+ * exemption first would make `spillReads: false` a no-op for every absolute
+ * spill path — the "documented but inert" failure the wiring closes.
  */
-/** Verbs that actually touch file contents — a protected path next to one is an access. */
-const ACCESS_VERBS = /\b(cat|bat|head|tail|less|more|cp|scp|rsync|curl|wget|source|tee|dd|install|xxd|base64|openssl|gpg|tar|zip)\b/
-/** Verbs that only scan/print the argument itself — mentioning a path is not reading it. */
-const MENTION_VERBS = /^\s*(grep|egrep|fgrep|rg|sed|awk|echo|printf|find|ls|test|wc|sort|uniq|jq)\b/
+function isExemptWritePath(path: string, cwd: string, containment?: WorkingDirContainmentSettings): boolean {
+  if (isRuntimeSpillPath(path, cwd)) return containment?.spillReads !== false
+  return isWithinTempDir(path, cwd)
+}
 
 /* ------------------------------------------------------------------ *
  * Protected operations, resolved from parsed segments
@@ -471,7 +501,8 @@ export function classify(ctx: ClassifyContext): Verdict {
     if (path && isBlockedPath(path, settings.protectedPaths)) {
       return { ruleId: 'secret.access', tier: 'ask', target: path }
     }
-    if (WRITE_FILE_TOOLS.has(tool) && path && cwd && isOutsideCwd(path, cwd) && !isWithinTempDir(path, cwd) && !isRuntimeSpillPath(path, cwd)) {
+    if (WRITE_FILE_TOOLS.has(tool) && path && cwd && settings.workingDirContainment?.enabled !== false
+      && isOutsideCwd(path, cwd) && !isExemptWritePath(path, cwd, settings.workingDirContainment)) {
       return { ruleId: 'fs.write.outside', tier: 'ask', target: path }
     }
     // Tool content is never scanned — an analysis/write call is not an access.
