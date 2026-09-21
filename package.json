@@ -37,7 +37,7 @@
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-tools": "0.1.6-alpha.2",
     "typescript": "^5.8.0",
-    "vitest": "^2.0.0",
+    "vitest": "^3.2.4",
     "@types/node": "^22.0.0"
   }
 }
