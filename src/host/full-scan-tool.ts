@@ -11,32 +11,20 @@ function workspaceRootFor(c:string|undefined, e:unknown): string {
   return typeof cwd==='string'&&cwd?cwd:process.cwd()
 }
 function resolveScript(root:string): string {
-  const direct = join(root, 'scripts/enforce-rules.mjs')
-  if (existsSync(direct)) return direct
-  // fallback: walk up from root and from process.cwd() to find workspace root containing scripts/enforce-rules.mjs
-  const candidates: string[] = []
-  // try ancestors of root
+  // ONLY the requested root and its ancestors. The old version also walked up
+  // from process.cwd() as a last resort, so a call aimed at a directory without
+  // the script silently scanned the guard's OWN checkout and returned that
+  // repo's blacklist hits as if they were the caller's. Scanning a tree nobody
+  // asked about is worse than reporting nothing: the report looks authoritative.
   let cur = resolve(root)
   for (let i=0;i<8;i++) {
     const cand = join(cur, 'scripts/enforce-rules.mjs')
     if (existsSync(cand)) return cand
-    candidates.push(cand)
     const parent = resolve(cur, '..')
     if (parent===cur) break
     cur = parent
   }
-  // try ancestors of process.cwd()
-  cur = process.cwd()
-  for (let i=0;i<8;i++) {
-    const cand = join(cur, 'scripts/enforce-rules.mjs')
-    if (existsSync(cand)) return cand
-    const parent = resolve(cur, '..')
-    if (parent===cur) break
-    cur = parent
-  }
-  // try maestro-harness workspace root resolved via __dirname ancestor search for packages/dsh-maestro-guard
-  // last resort: return direct (will error but report will contain command)
-  return direct
+  return join(resolve(root), 'scripts/enforce-rules.mjs')
 }
 export function apply(ctx: Context, config:{rootPath?:string}={}) {
   ctx.effect(()=> ctx.tools.register(defineTool({
@@ -51,7 +39,9 @@ export function apply(ctx: Context, config:{rootPath?:string}={}) {
         return {ok: true, report: `enforce-rules: no script found at ${script} (standalone repo, skipping)`, code: 0}
       }
       const run = (extra:string[])=>{
-        const r=spawnSync('node', [script, ...extra], {encoding:'utf-8', timeout: 30000})
+        // cwd = the scanned root: the script resolves its own targets relative to
+        // it, so inheriting the host's cwd made the report describe the wrong tree.
+        const r=spawnSync('node', [script, ...extra], {encoding:'utf-8', timeout: 30000, cwd: resolve(root)})
         return {code: r.status??0, out: (r.stdout??'')+(r.stderr??'')}
       }
       let combined=''
